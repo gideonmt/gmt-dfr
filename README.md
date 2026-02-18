@@ -1,6 +1,10 @@
 # gmt-dfr
 Work in progress personal fork of [AsahiLinux/tiny-dfr](https://github.com/AsahiLinux/tiny-dfr) customised for my own setup. 
 
+`nix develop`
+build: `nix build` 
+run: `sudo ./result/bin/tiny-dfr`
+
 ## Dependencies
 cairo, libinput, freetype, fontconfig, librsvg 2.59 or later, uinput enabled in kernel config
 

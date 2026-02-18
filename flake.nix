@@ -1,6 +1,6 @@
 {
-  description = "The most basic dynamic function row daemon possible";
-  inputs = { nixpkgs.url = "github:nixos/nixpkgs/nixos-24.11"; };
+  description = "Personal fork of tiny-dfr";
+  inputs = { nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11"; };
   outputs = { self, nixpkgs }:
     let
       supportedSystems = [ "x86_64-linux" "aarch64-linux" ];
@@ -11,7 +11,7 @@
         let pkgs = pkgsFor.${system};
         in {
           default = pkgs.rustPlatform.buildRustPackage {
-            pname = "tiny-dfr";
+            pname = "gmt-dfr";
             version = "0.3.5";
             src = ./.;
             cargoLock = { lockFile = ./Cargo.lock; };
