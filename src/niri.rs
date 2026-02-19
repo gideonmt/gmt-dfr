@@ -64,9 +64,9 @@ impl NiriConnection {
         let path = socket_path()?;
         let mut stream = UnixStream::connect(&path)?;
 
-        // Blocking write for the initial request
-        stream.write_all(br#"{"action":"EventStream"}"#)?;
-        stream.write_all(b"\n")?;
+        // Request::EventStream serialises as the bare string "EventStream"
+        // (serde externally-tagged enum with a unit variant)
+        stream.write_all(b"\"EventStream\"\n")?;
         // Stay blocking so we can read the initial state burst synchronously
 
         let stream_for_fd = stream.try_clone()?;
@@ -135,10 +135,14 @@ impl NiriConnection {
     }
 
     fn handle_line(&mut self, line: &str) -> bool {
+        // niri events are wrapped: {"Ok": {"EventStreamStarted": {}}}
+        // or: {"Ok": {"WorkspacesChanged": {"workspaces": [...]}}}
         let Ok(outer) = serde_json::from_str::<serde_json::Value>(line) else {
+            eprintln!("[niri] failed to parse line: {}", line);
             return false;
         };
         let Some(ok) = outer.get("Ok") else {
+            eprintln!("[niri] no Ok key in: {}", line);
             return false;
         };
 
@@ -154,6 +158,7 @@ impl NiriConnection {
                     })
                     .collect();
                 self.state.workspaces.sort_by_key(|w| w.idx);
+                eprintln!("[niri] workspaces updated: {} workspaces", self.state.workspaces.len());
                 return true;
             }
         }
@@ -161,6 +166,7 @@ impl NiriConnection {
         if let Some(wf) = ok.get("WindowFocusChanged") {
             if let Ok(inner) = serde_json::from_value::<WindowFocusChangedInner>(wf.clone()) {
                 self.state.focused_window_title = inner.window.and_then(|w| w.title);
+                eprintln!("[niri] window title: {:?}", self.state.focused_window_title);
                 return true;
             }
         }
@@ -168,15 +174,16 @@ impl NiriConnection {
         false
     }
 
-    /// Send a focus-workspace request (fire and forget on a fresh socket).
+    /// Send a focus-workspace request on a fresh socket (fire and forget).
+    /// niri action JSON: {"Action": {"FocusWorkspace": {"reference": {"Id": N}}}}
     pub fn focus_workspace(&self, id: u64) {
-        if let Ok(mut s) = UnixStream::connect(socket_path().unwrap_or_default()) {
-            let msg = format!(
-                "{{\"action\":{{\"FocusWorkspace\":{{\"reference\":{{\"Id\":{}}}}}}}}}\n",
-                id
-            );
-            let _ = s.write_all(msg.as_bytes());
-        }
+        let Ok(path) = socket_path() else { return };
+        let Ok(mut s) = UnixStream::connect(path) else { return };
+        let msg = format!(
+            "{{\"Action\":{{\"FocusWorkspace\":{{\"reference\":{{\"Id\":{}}}}}}}}}\n",
+            id
+        );
+        let _ = s.write_all(msg.as_bytes());
     }
 }
 
