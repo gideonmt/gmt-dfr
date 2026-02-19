@@ -643,6 +643,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78ca9ab1a0babb1e7d5695e3530886289c18cf2f87ec19a575a0abdce112e3a3"
 
 [[package]]
+name = "niri-ipc"
+version = "25.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12bd9eb4e437f5282ce853cf66837658379cb537b4b6bae687da59246005329a"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nix"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -955,6 +965,7 @@ dependencies = [
  "input-linux-sys",
  "libc",
  "librsvg-rebind",
+ "niri-ipc",
  "nix 0.29.0",
  "pkg-config",
  "privdrop",

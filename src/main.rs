@@ -48,7 +48,6 @@ use crate::config::ConfigManager;
 use backlight::BacklightManager;
 use config::{ButtonConfig, Config};
 use display::DrmBackend;
-use niri::NiriConnection;
 use pixel_shift::{PixelShiftManager, PIXEL_SHIFT_WIDTH_PX};
 
 const BUTTON_SPACING_PX: i32 = 16;
@@ -383,11 +382,7 @@ impl Button {
         }
     }
 
-    fn new_niri_workspace(idx: u8, focused: bool, id: u64) -> Button {
-        // Store id encoded in action as a sentinel — actual switching is done
-        // via NiriConnection, not uinput. We use a dummy key slot and intercept
-        // in the touch handler instead.
-        let _ = id; // id is used in touch handler via layer state, not here
+    fn new_niri_workspace(idx: u8, focused: bool) -> Button {
         Button {
             action: vec![],
             active: false,
@@ -479,20 +474,12 @@ impl Button {
                 c.show_text(&label).unwrap();
             }
             ButtonImage::NiriWindowTitle(title) => {
-                // Truncate title to fit within button width, appending "…" if needed
                 let max_w = button_width as f64 - 16.0;
                 let full_extents = c.text_extents(title).unwrap();
-                if full_extents.width() <= max_w {
-                    let extents = c.text_extents(title).unwrap();
-                    c.move_to(
-                        button_left_edge
-                            + (button_width as f64 / 2.0 - extents.width() / 2.0).round(),
-                        y_shift + (height as f64 / 2.0 + extents.height() / 2.0).round(),
-                    );
-                    c.show_text(title).unwrap();
+                let display = if full_extents.width() <= max_w {
+                    title.clone()
                 } else {
-                    // Binary-search for the longest prefix that fits with "…"
-                    let ellipsis = "…";
+                    let ellipsis = "\u{2026}";
                     let ellipsis_w = c.text_extents(ellipsis).unwrap().width();
                     let char_indices: Vec<_> = title.char_indices().collect();
                     let mut lo = 0usize;
@@ -500,24 +487,19 @@ impl Button {
                     while lo + 1 < hi {
                         let mid = (lo + hi) / 2;
                         let byte_end = char_indices[mid].0;
-                        let candidate = &title[..byte_end];
-                        let w = c.text_extents(candidate).unwrap().width();
-                        if w + ellipsis_w <= max_w {
-                            lo = mid;
-                        } else {
-                            hi = mid;
-                        }
+                        let w = c.text_extents(&title[..byte_end]).unwrap().width();
+                        if w + ellipsis_w <= max_w { lo = mid; } else { hi = mid; }
                     }
                     let byte_end = char_indices.get(lo).map(|(i, _)| *i).unwrap_or(0);
-                    let truncated = format!("{}{}", &title[..byte_end], ellipsis);
-                    let extents = c.text_extents(&truncated).unwrap();
-                    c.move_to(
-                        button_left_edge
-                            + (button_width as f64 / 2.0 - extents.width() / 2.0).round(),
-                        y_shift + (height as f64 / 2.0 + extents.height() / 2.0).round(),
-                    );
-                    c.show_text(&truncated).unwrap();
-                }
+                    format!("{}{}", &title[..byte_end], ellipsis)
+                };
+                let extents = c.text_extents(&display).unwrap();
+                c.move_to(
+                    button_left_edge
+                        + (button_width as f64 / 2.0 - extents.width() / 2.0).round(),
+                    y_shift + (height as f64 / 2.0 + extents.height() / 2.0).round(),
+                );
+                c.show_text(&display).unwrap();
             }
             ButtonImage::Battery(battery, battery_mode, icons) => {
                 let (capacity, state) = get_battery_state(battery);
@@ -559,8 +541,7 @@ impl Button {
                         width += ICON_SIZE as f64;
                     }
                     text_offset = ICON_SIZE;
-                    let x =
-                        button_left_edge + (button_width as f64 / 2.0 - width / 2.0).round();
+                    let x = button_left_edge + (button_width as f64 / 2.0 - width / 2.0).round();
                     let y = y_shift + ((height as f64 - ICON_SIZE as f64) / 2.0).round();
                     svg.render_document(
                         c,
@@ -571,8 +552,7 @@ impl Button {
                 if battery_mode.should_draw_text() {
                     c.move_to(
                         button_left_edge
-                            + (button_width as f64 / 2.0 - width / 2.0
-                                + text_offset as f64)
+                            + (button_width as f64 / 2.0 - width / 2.0 + text_offset as f64)
                                 .round(),
                         y_shift + (height as f64 / 2.0 + extents.height() / 2.0).round(),
                     );
@@ -587,7 +567,6 @@ impl Button {
     where
         F: AsRawFd,
     {
-        // Non-clickable buttons never respond to touch
         if !self.clickable {
             return;
         }
@@ -600,7 +579,6 @@ impl Button {
 
     fn set_background_color(&self, c: &Context, color: f64) {
         if !self.clickable {
-            // Display-only buttons: no background box drawn at all (caller checks clickable)
             c.set_source_rgb(0.0, 0.0, 0.0);
             return;
         }
@@ -615,7 +593,6 @@ impl Button {
             }
             ButtonImage::NiriWorkspace { focused, .. } => {
                 if *focused {
-                    // Focused workspace: teal/cyan highlight
                     c.set_source_rgb(0.0, color * 2.0, color * 2.0);
                 } else {
                     c.set_source_rgb(color, color, color);
@@ -633,9 +610,8 @@ pub struct FunctionLayer {
     pub buttons: Vec<(usize, Button)>,
     pub virtual_button_count: usize,
     faster_refresh: bool,
-    /// Workspace ids parallel to buttons that are NiriWorkspace variants,
-    /// so the touch handler can call focus_workspace without storing id in Key.
-    pub niri_workspace_ids: Vec<(usize, u64)>, // (button index, niri workspace id)
+    /// (button_index, workspace_idx) for NiriWorkspace buttons
+    pub niri_workspace_ids: Vec<(usize, u8)>,
 }
 
 impl FunctionLayer {
@@ -750,7 +726,6 @@ impl FunctionLayer {
                 c.fill().unwrap();
             }
 
-            // Only draw the button box for clickable, non-spacer buttons
             if !matches!(button.image, ButtonImage::Spacer) && button.clickable {
                 button.set_background_color(&c, color);
                 c.new_sub_path();
@@ -766,7 +741,6 @@ impl FunctionLayer {
 
             c.set_source_rgb(1.0, 1.0, 1.0);
             button.render(&c, height, left_edge, button_width.ceil() as u64, pixel_shift_y);
-
             button.changed = false;
 
             if !complete_redraw {
@@ -799,7 +773,6 @@ impl FunctionLayer {
             return None;
         }
 
-        // Non-clickable buttons cannot be hit
         if !self.buttons[i].1.clickable {
             return None;
         }
@@ -811,7 +784,8 @@ impl FunctionLayer {
             self.virtual_button_count
         };
 
-        let left_edge = (start as f64 * (virtual_button_width + BUTTON_SPACING_PX as f64)).floor();
+        let left_edge =
+            (start as f64 * (virtual_button_width + BUTTON_SPACING_PX as f64)).floor();
         let button_width = virtual_button_width
             + ((end - start - 1) as f64 * (virtual_button_width + BUTTON_SPACING_PX as f64))
                 .floor();
@@ -829,39 +803,32 @@ impl FunctionLayer {
 }
 
 /// Rebuild the info layer (index 1) from live Niri state.
-/// Layout: [ws1][ws2]...[wsN][     window title     ][clock]
+/// Layout: [ws1][ws2]...[wsN][   window title   ][ clock ]
 fn rebuild_info_layer(layers: &mut Vec<FunctionLayer>, niri_state: &niri::NiriState) {
     let Some(layer) = layers.get_mut(1) else {
         return;
     };
 
     let ws_count = niri_state.workspaces.len();
-    // Workspace buttons each get 1 virtual slot.
-    // Window title gets a generous stretch. Clock gets 4 slots.
     let title_stretch = 6usize;
     let clock_stretch = 4usize;
     let total = ws_count + title_stretch + clock_stretch;
 
     let mut buttons: Vec<(usize, Button)> = Vec::new();
-    let mut niri_workspace_ids: Vec<(usize, u64)> = Vec::new();
+    let mut niri_workspace_ids: Vec<(usize, u8)> = Vec::new();
     let mut virt = 0usize;
 
     for ws in &niri_state.workspaces {
-        let btn = Button::new_niri_workspace(ws.idx, ws.is_focused, ws.id);
         let btn_index = buttons.len();
-        niri_workspace_ids.push((btn_index, ws.id));
-        buttons.push((virt, btn));
+        niri_workspace_ids.push((btn_index, ws.idx));
+        buttons.push((virt, Button::new_niri_workspace(ws.idx, ws.is_focused)));
         virt += 1;
     }
 
-    let title = niri_state
-        .focused_window_title
-        .clone()
-        .unwrap_or_default();
+    let title = niri_state.focused_window_title.clone().unwrap_or_default();
     buttons.push((virt, Button::new_niri_window_title(title)));
     virt += title_stretch;
 
-    // Clock (non-clickable)
     let clock_format = StrftimeItems::new("%a %b %d %I:%M:%S %p")
         .parse_to_owned()
         .expect("valid clock format");
@@ -875,13 +842,12 @@ fn rebuild_info_layer(layers: &mut Vec<FunctionLayer>, niri_state: &niri::NiriSt
             image: ButtonImage::Time(clock_format, Locale::POSIX),
         },
     ));
-    virt += clock_stretch;
 
     layer.buttons = buttons;
-    layer.virtual_button_count = total.max(virt);
+    layer.virtual_button_count = total;
     layer.niri_workspace_ids = niri_workspace_ids;
     layer.displays_time = true;
-    layer.faster_refresh = true; // clock has seconds
+    layer.faster_refresh = true;
 }
 
 struct Interface;
@@ -972,13 +938,9 @@ fn real_main(drm: &mut DrmBackend) {
     let (mut cfg, mut layers) = cfg_mgr.load_config(width);
     let mut pixel_shift = PixelShiftManager::new();
 
-    // Connect to Niri event stream (optional — graceful if not running under Niri)
-    let mut niri: Option<NiriConnection> = NiriConnection::connect().ok();
-
-    // connect() already blocked until initial WorkspacesChanged arrived.
-    if let Some(ref n) = niri {
-        rebuild_info_layer(&mut layers, &n.state);
-    }
+    // Connect to niri and get initial state (must happen before privilege drop)
+    let mut niri_state = niri::NiriState::connect().unwrap_or_default();
+    rebuild_info_layer(&mut layers, &niri_state);
 
     // Drop privileges to input and video group
     let groups = ["input", "video"];
@@ -1020,11 +982,6 @@ fn real_main(drm: &mut DrmBackend) {
     epoll
         .add(&udev_monitor, EpollEvent::new(EpollFlags::EPOLLIN, 3))
         .unwrap();
-    if let Some(ref n) = niri {
-        epoll
-            .add(n, EpollEvent::new(EpollFlags::EPOLLIN, 4))
-            .unwrap();
-    }
 
     uinput.set_evbit(EventKind::Key).unwrap();
     for layer in &layers {
@@ -1062,22 +1019,24 @@ fn real_main(drm: &mut DrmBackend) {
         Local::now().minute()
     };
 
+    // Poll niri every NIRI_POLL_MS milliseconds
+    const NIRI_POLL_MS: u64 = 1000;
+    let mut last_niri_poll = std::time::Instant::now();
+
     loop {
         // Config reload
         if cfg_mgr.update_config(&mut cfg, &mut layers, width) {
             active_layer = 0;
             fn_tap_layer = 0;
             needs_complete_redraw = true;
-            // Re-populate info layer from cached niri state after config reload
-            if let Some(ref n) = niri {
-                rebuild_info_layer(&mut layers, &n.state);
-            }
+            rebuild_info_layer(&mut layers, &niri_state);
         }
 
-        // Niri events
-        if let Some(ref mut n) = niri {
-            if n.process_events() {
-                rebuild_info_layer(&mut layers, &n.state);
+        // Poll niri state periodically
+        if last_niri_poll.elapsed().as_millis() as u64 >= NIRI_POLL_MS {
+            last_niri_poll = std::time::Instant::now();
+            if niri_state.poll() {
+                rebuild_info_layer(&mut layers, &niri_state);
                 if active_layer == 1 {
                     needs_complete_redraw = true;
                 }
@@ -1096,7 +1055,9 @@ fn real_main(drm: &mut DrmBackend) {
             next_timeout_ms = min(next_timeout_ms, pixel_shift_next_timeout_ms);
         }
 
-        // When on the info layer with seconds, redraw every second
+        // Cap timeout so niri poll fires on time
+        next_timeout_ms = min(next_timeout_ms, NIRI_POLL_MS as i32);
+
         let current_ts = if layers[active_layer].faster_refresh {
             Local::now().second()
         } else {
@@ -1107,7 +1068,6 @@ fn real_main(drm: &mut DrmBackend) {
             last_redraw_ts = current_ts;
         }
 
-        // Battery polling
         if layers[active_layer].displays_battery {
             for button in &mut layers[active_layer].buttons {
                 if let ButtonImage::Battery(_, _, _) = button.1.image {
@@ -1162,7 +1122,7 @@ fn real_main(drm: &mut DrmBackend) {
                         match key.key_state() {
                             KeyState::Pressed => {
                                 fn_press_time = Some(std::time::Instant::now());
-                                // Hold Fn: peek at media layer (always last layer)
+                                // Hold Fn: peek at media layer (always last)
                                 if layers.len() > 1 {
                                     active_layer = layers.len() - 1;
                                     needs_complete_redraw = true;
@@ -1174,11 +1134,9 @@ fn real_main(drm: &mut DrmBackend) {
                                     .map(|t| t.elapsed().as_millis() < FN_TAP_THRESHOLD_MS)
                                     .unwrap_or(false);
                                 if was_tap {
-                                    // Tap: cycle to next layer, wrapping around
                                     fn_tap_layer = (fn_tap_layer + 1) % layers.len();
                                     active_layer = fn_tap_layer;
                                 } else {
-                                    // Hold released: snap back to latched layer
                                     active_layer = fn_tap_layer;
                                 }
                                 needs_complete_redraw = true;
@@ -1198,21 +1156,17 @@ fn real_main(drm: &mut DrmBackend) {
                                 layers[active_layer].hit(width, height, x, y, None)
                             {
                                 touches.insert(dn.seat_slot() as i32, (active_layer, btn));
-                                // Check if this is a Niri workspace button
                                 let is_niri_ws = matches!(
                                     layers[active_layer].buttons[btn].1.image,
                                     ButtonImage::NiriWorkspace { .. }
                                 );
                                 if is_niri_ws {
-                                    // Find the workspace id for this button index
-                                    if let Some(ref n) = niri {
-                                        if let Some(&(_, ws_id)) = layers[active_layer]
-                                            .niri_workspace_ids
-                                            .iter()
-                                            .find(|&&(bi, _)| bi == btn)
-                                        {
-                                            n.focus_workspace(ws_id as u64);
-                                        }
+                                    if let Some(&(_, ws_idx)) = layers[active_layer]
+                                        .niri_workspace_ids
+                                        .iter()
+                                        .find(|&&(bi, _)| bi == btn)
+                                    {
+                                        niri_state.focus_workspace(ws_idx);
                                     }
                                 } else {
                                     layers[active_layer].buttons[btn]
