@@ -54,6 +54,7 @@ const BUTTON_COLOR_INACTIVE: f64 = 0.200;
 const BUTTON_COLOR_ACTIVE: f64 = 0.400;
 const ICON_SIZE: i32 = 48;
 const TIMEOUT_MS: i32 = 10 * 1000;
+const FN_TAP_THRESHOLD_MS: u128 = 300;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BatteryState {
@@ -806,6 +807,8 @@ fn real_main(drm: &mut DrmBackend) {
     let mut surface =
         ImageSurface::create(Format::ARgb32, db_width as i32, db_height as i32).unwrap();
     let mut active_layer = 0;
+    let mut fn_tap_layer: usize = 0;
+    let mut fn_press_time: Option<std::time::Instant> = None;
     let mut needs_complete_redraw = true;
 
     let mut input_tb = Libinput::new_with_udev(Interface);
@@ -943,13 +946,30 @@ fn real_main(drm: &mut DrmBackend) {
                 }
                 Event::Keyboard(KeyboardEvent::Key(key)) => {
                     if key.key() == Key::Fn as u32 {
-                        let new_layer = match key.key_state() {
-                            KeyState::Pressed => 1,
-                            KeyState::Released => 0,
-                        };
-                        if active_layer != new_layer {
-                            active_layer = new_layer;
-                            needs_complete_redraw = true;
+                        match key.key_state() {
+                            KeyState::Pressed => {
+                                fn_press_time = Some(std::time::Instant::now());
+                                // peek at layer 1 while held
+                                if layers.len() > 1 {
+                                    active_layer = 1;
+                                    needs_complete_redraw = true;
+                                }
+                            }
+                            KeyState::Released => {
+                                let was_tap = fn_press_time
+                                    .take()
+                                    .map(|t| t.elapsed().as_millis() < FN_TAP_THRESHOLD_MS)
+                                    .unwrap_or(false);
+                                if was_tap {
+                                    // cycle to next layer, wrapping around
+                                    fn_tap_layer = (fn_tap_layer + 1) % layers.len();
+                                    active_layer = fn_tap_layer;
+                                } else {
+                                    // held: snap back to latched layer
+                                    active_layer = fn_tap_layer;
+                                }
+                                needs_complete_redraw = true;
+                            }
                         }
                     }
                 }
