@@ -22,7 +22,10 @@ EnablePixelShift = false
 # For full reference on accepted values see the fontconfig user guide,
 # section "Font Names"
 # https://www.freedesktop.org/software/fontconfig/fontconfig-user.html
-FontTemplate = ":bold"
+FontTemplate = "JetBrainsMono:bold"
+
+# Font size in points
+FontSize = 22.0
 
 # Set this to false if you want the brightness of the touchbar
 # to be set to a static value instead of following the primary
@@ -143,9 +146,12 @@ PrimaryLayerKeys = [
 
 InfoLayerKeys = [
     { NiriWorkspaces = true },
-    { NiriWindowTitle = true, Stretch = 6 },
-    { Battery = "both", Action = "Battery" },
-    { Time = "%a %b %d %I:%M:%S %p", Stretch = 4 }
+    { NiriWindowTitle = true, Stretch = 4 },
+    { Volume = true,     Stretch = 2 },
+    { Brightness = true, Stretch = 2 },
+    { Wifi = true,       Stretch = 3 },
+    { Battery = "both",  Action = "Battery", Stretch = 2 },
+    { Time = "%a %b %d %I:%M %p", Stretch = 3 }
 ]
 
 # This key defines the contents of the media key layer

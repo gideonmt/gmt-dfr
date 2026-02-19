@@ -84,12 +84,33 @@ impl BatteryIconMode {
     }
 }
 
+fn get_volume_percent() -> Option<(u32, bool)> {
+    Some((0, true))
+}
+
+fn get_brightness_percent() -> Option<u32> {
+    None
+}
+
+#[derive(Clone, Debug)]
+pub struct WifiInfo {
+    pub ssid: String,
+    pub signal: i32,
+}
+
+fn get_wifi_info() -> Option<WifiInfo> {
+    None
+}
+
 enum ButtonImage {
     Text(String),
     Svg(Handle),
     Bitmap(ImageSurface),
     Time(Vec<ChronoItem<'static>>, Locale),
     Battery(String, BatteryIconMode, BatteryImages),
+    Volume,
+    Brightness,
+    Wifi,
     NiriWorkspace { idx: u8, focused: bool },
     NiriWindowTitle(String),
     Spacer,
@@ -100,7 +121,6 @@ struct Button {
     changed: bool,
     active: bool,
     action: Vec<Key>,
-    /// If false, the button cannot be pressed: no visual highlight, no key events.
     clickable: bool,
 }
 
@@ -252,6 +272,12 @@ impl Button {
             } else {
                 Button::new_text("Battery N/A".to_string(), cfg.action)
             }
+        } else if cfg.volume == Some(true) {
+            Button::new_simple(ButtonImage::Volume, cfg.action, false)
+        } else if cfg.brightness == Some(true) {
+            Button::new_simple(ButtonImage::Brightness, cfg.action, false)
+        } else if cfg.wifi == Some(true) {
+            Button::new_simple(ButtonImage::Wifi, cfg.action, false)
         } else {
             Button::new_spacer()
         }
@@ -274,6 +300,16 @@ impl Button {
             changed: false,
             clickable: true,
             image: ButtonImage::Text(text),
+        }
+    }
+
+    fn new_simple(image: ButtonImage, action: Vec<Key>, clickable: bool) -> Button {
+        Button {
+            action,
+            active: false,
+            changed: true,
+            clickable,
+            image,
         }
     }
 
@@ -381,10 +417,7 @@ impl Button {
     }
 
     fn new_niri_workspace(idx: u8, focused: bool, id: u64) -> Button {
-        // Store id encoded in action as a sentinel — actual switching is done
-        // via NiriConnection, not uinput. We use a dummy key slot and intercept
-        // in the touch handler instead.
-        let _ = id; // id is used in touch handler via layer state, not here
+        let _ = id;
         Button {
             action: vec![],
             active: false,
@@ -415,6 +448,8 @@ impl Button {
                         | Item::Numeric(Numeric::Timestamp, _)
                 )
             }),
+            // Volume and brightness poll on every redraw cycle
+            ButtonImage::Volume | ButtonImage::Brightness | ButtonImage::Wifi => false,
             _ => false,
         }
     }
@@ -426,6 +461,7 @@ impl Button {
         button_left_edge: f64,
         button_width: u64,
         y_shift: f64,
+        cfg: &Config,
     ) {
         match &self.image {
             ButtonImage::Text(text) => {
@@ -465,6 +501,44 @@ impl Button {
                 );
                 c.show_text(&formatted_time).unwrap();
             }
+            ButtonImage::Volume => {
+                // Icons match waybar pulseaudio format-icons: 󰕿 󰖀 󰕾 and muted 󰝟
+                let text = match get_volume_percent() {
+                    Some((v, muted)) if muted => "\u{f075f}".to_string(),
+                    Some((v, _)) => {
+                        let icon = if v == 0 { "\u{f057f}" }
+                                   else if v < 50 { "\u{f0580}" }
+                                   else { "\u{f057e}" };
+                        format!("{} {}%", icon, v)
+                    }
+                    None => "\u{f057e} --".to_string(),
+                };
+                render_centered_text(c, height, button_left_edge, button_width, y_shift, &text);
+            }
+            ButtonImage::Brightness => {
+                // Icons match waybar backlight format-icons: 󱩎 through 󱩖 (9 steps)
+                let text = match get_brightness_percent() {
+                    Some(v) => {
+                        let icons = ["\u{fe24e}", "\u{fe24f}", "\u{fe250}", "\u{fe251}",
+                                     "\u{fe252}", "\u{fe253}", "\u{fe254}", "\u{fe255}", "\u{fe256}"];
+                        let idx = ((v as usize).min(100) * (icons.len() - 1) / 100);
+                        format!("{} {}%", icons[idx], v)
+                    }
+                    None => "\u{fe256} --".to_string(),
+                };
+                render_centered_text(c, height, button_left_edge, button_width, y_shift, &text);
+            }
+            ButtonImage::Wifi => {
+                // Network icons: 󰤨 connected, 󰤭  disconnected
+                let text = match get_wifi_info() {
+                    Some(info) => {
+                        let icon = wifi_icon(info.signal);
+                        format!("{} {}", icon, truncate_ssid(&info.ssid, 8))
+                    }
+                    None => "\u{f0935}".to_string(),
+                };
+                render_centered_text(c, height, button_left_edge, button_width, y_shift, &text);
+            }
             ButtonImage::NiriWorkspace { idx, .. } => {
                 let label = idx.to_string();
                 let extents = c.text_extents(&label).unwrap();
@@ -476,7 +550,6 @@ impl Button {
                 c.show_text(&label).unwrap();
             }
             ButtonImage::NiriWindowTitle(title) => {
-                // Truncate title to fit within button width, appending "…" if needed
                 let max_w = button_width as f64 - 16.0;
                 let full_extents = c.text_extents(title).unwrap();
                 if full_extents.width() <= max_w {
@@ -488,7 +561,6 @@ impl Button {
                     );
                     c.show_text(title).unwrap();
                 } else {
-                    // Binary-search for the longest prefix that fits with "…"
                     let ellipsis = "…";
                     let ellipsis_w = c.text_extents(ellipsis).unwrap().width();
                     let char_indices: Vec<_> = title.char_indices().collect();
@@ -584,7 +656,6 @@ impl Button {
     where
         F: AsRawFd,
     {
-        // Non-clickable buttons never respond to touch
         if !self.clickable {
             return;
         }
@@ -619,15 +690,52 @@ impl Button {
     }
 }
 
+fn render_centered_text(
+    c: &Context,
+    height: i32,
+    left: f64,
+    width: u64,
+    y_shift: f64,
+    text: &str,
+) {
+    let extents = c.text_extents(text).unwrap();
+    c.move_to(
+        left + (width as f64 / 2.0 - extents.width() / 2.0).round(),
+        y_shift + (height as f64 / 2.0 + extents.height() / 2.0).round(),
+    );
+    c.show_text(text).unwrap();
+}
+
+// Nerd Font wifi icons by signal strength: 󰤯 󰤟 󰤢 󰤥 󰤨
+fn wifi_icon(signal: i32) -> &'static str {
+    match signal {
+        80..=100 => "\u{f0928}",
+        60..=79  => "\u{f0925}",
+        40..=59  => "\u{f0922}",
+        1..=39   => "\u{f091f}",
+        _        => "\u{f092f}",
+    }
+}
+
+fn truncate_ssid(ssid: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = ssid.chars().collect();
+    if chars.len() <= max_chars {
+        ssid.to_string()
+    } else {
+        let truncated: String = chars[..max_chars - 1].iter().collect();
+        format!("{}…", truncated)
+    }
+}
+
 #[derive(Default)]
 pub struct FunctionLayer {
     displays_time: bool,
     displays_battery: bool,
+    displays_live: bool,
     pub buttons: Vec<(usize, Button)>,
     pub virtual_button_count: usize,
     faster_refresh: bool,
     pub niri_workspace_ids: Vec<(usize, u8)>,
-    // stored so rebuild_info_layer can re-expand niri_workspaces/niri_window_title entries
     pub source_config: Vec<ButtonConfig>,
 }
 
@@ -640,6 +748,9 @@ impl FunctionLayer {
         let mut virtual_button_count = 0;
         let displays_time = cfg.iter().any(|cfg| cfg.time.is_some());
         let displays_battery = cfg.iter().any(|cfg| cfg.battery.is_some());
+        let displays_live = cfg.iter().any(|cfg| {
+            cfg.volume == Some(true) || cfg.brightness == Some(true) || cfg.wifi == Some(true)
+        });
         let buttons = cfg
             .into_iter()
             .scan(&mut virtual_button_count, |state, cfg| {
@@ -657,6 +768,7 @@ impl FunctionLayer {
         FunctionLayer {
             displays_time,
             displays_battery,
+            displays_live,
             buttons,
             virtual_button_count,
             faster_refresh,
@@ -702,7 +814,7 @@ impl FunctionLayer {
             c.paint().unwrap();
         }
         c.set_font_face(&config.font_face);
-        c.set_font_size(32.0);
+        c.set_font_size(config.font_size);
 
         for i in 0..self.buttons.len() {
             let end = if i + 1 < self.buttons.len() {
@@ -738,7 +850,6 @@ impl FunctionLayer {
                 c.fill().unwrap();
             }
 
-            // only draw box for clickable non-spacer buttons
             let draw_active = button.active;
             let draw_outline = config.show_button_outlines || button.active;
             if !matches!(button.image, ButtonImage::Spacer) && button.clickable && draw_outline {
@@ -756,7 +867,7 @@ impl FunctionLayer {
 
             let (r,g,b) = config.theme.foreground;
             c.set_source_rgb(r, g, b);
-            button.render(&c, height, left_edge, button_width.ceil() as u64, pixel_shift_y);
+            button.render(&c, height, left_edge, button_width.ceil() as u64, pixel_shift_y, config);
 
             button.changed = false;
 
@@ -790,7 +901,6 @@ impl FunctionLayer {
             return None;
         }
 
-        // Non-clickable buttons cannot be hit
         if !self.buttons[i].1.clickable {
             return None;
         }
@@ -819,8 +929,6 @@ impl FunctionLayer {
     }
 }
 
-/// Rebuild the info layer (index 1) from live Niri state.
-/// Layout: [ws1][ws2]...[wsN][     window title     ][clock]
 fn rebuild_info_layer(layers: &mut Vec<FunctionLayer>, niri_state: &niri::NiriState) {
     let Some(info_cfg) = layers.get(1).map(|l| l.source_config.clone()) else {
         return;
@@ -833,12 +941,12 @@ fn rebuild_info_layer(layers: &mut Vec<FunctionLayer>, niri_state: &niri::NiriSt
     let mut total = 0usize;
     let mut displays_time = false;
     let mut faster_refresh = false;
+    let mut displays_live = false;
 
     for cfg in &info_cfg {
         let stretch = cfg.stretch.unwrap_or(1);
 
         if cfg.niri_workspaces == Some(true) {
-            // expand one slot per workspace
             for ws in &niri_state.workspaces {
                 let btn_index = buttons.len();
                 niri_workspace_ids.push((btn_index, ws.idx));
@@ -857,11 +965,13 @@ fn rebuild_info_layer(layers: &mut Vec<FunctionLayer>, niri_state: &niri::NiriSt
             continue;
         }
 
-        // regular button (time, text, icon, battery, etc)
         let btn = Button::with_config(cfg.clone());
         if matches!(btn.image, ButtonImage::Time(..)) {
             displays_time = true;
             faster_refresh = btn.needs_faster_refresh();
+        }
+        if matches!(btn.image, ButtonImage::Volume | ButtonImage::Brightness | ButtonImage::Wifi) {
+            displays_live = true;
         }
         buttons.push((virt, btn));
         virt += stretch;
@@ -873,6 +983,7 @@ fn rebuild_info_layer(layers: &mut Vec<FunctionLayer>, niri_state: &niri::NiriSt
     layer.niri_workspace_ids = niri_workspace_ids;
     layer.displays_time = displays_time;
     layer.faster_refresh = faster_refresh;
+    layer.displays_live = displays_live;
 }
 
 struct Interface;
@@ -963,13 +1074,11 @@ fn real_main(drm: &mut DrmBackend) {
     let (mut cfg, mut layers) = cfg_mgr.load_config(width);
     let mut pixel_shift = PixelShiftManager::new();
 
-    // Connect to niri event stream before privilege drop (socket must be opened as real user)
     let mut niri: Option<niri::NiriState> = niri::NiriState::connect();
     if let Some(ref n) = niri {
         rebuild_info_layer(&mut layers, n);
     }
 
-    // Drop privileges to input and video group
     let groups = ["input", "video"];
     PrivDrop::default()
         .user("nobody")
@@ -1049,24 +1158,39 @@ fn real_main(drm: &mut DrmBackend) {
         Local::now().minute()
     };
 
+    // Poll live modules (vol/brt/wifi) every N seconds
+    const LIVE_POLL_MS: u64 = 3000;
+    let mut last_live_poll = std::time::Instant::now();
+
     loop {
-        // Config reload
         if cfg_mgr.update_config(&mut cfg, &mut layers, width) {
             active_layer = 0;
             fn_tap_layer = 0;
             needs_complete_redraw = true;
-            // Re-populate info layer from cached niri state after config reload
             if let Some(ref n) = niri {
                 rebuild_info_layer(&mut layers, n);
             }
         }
 
-        // Niri event stream
         if let Some(ref mut n) = niri {
             if n.process_events() {
                 rebuild_info_layer(&mut layers, n);
                 if active_layer == 1 {
                     needs_complete_redraw = true;
+                }
+            }
+        }
+
+        if layers[active_layer].displays_live
+            && last_live_poll.elapsed().as_millis() as u64 >= LIVE_POLL_MS
+        {
+            last_live_poll = std::time::Instant::now();
+            for button in &mut layers[active_layer].buttons {
+                if matches!(
+                    button.1.image,
+                    ButtonImage::Volume | ButtonImage::Brightness | ButtonImage::Wifi
+                ) {
+                    button.1.changed = true;
                 }
             }
         }
@@ -1083,7 +1207,6 @@ fn real_main(drm: &mut DrmBackend) {
             next_timeout_ms = min(next_timeout_ms, pixel_shift_next_timeout_ms);
         }
 
-        // When on the info layer with seconds, redraw every second
         let current_ts = if layers[active_layer].faster_refresh {
             Local::now().second()
         } else {
@@ -1094,7 +1217,6 @@ fn real_main(drm: &mut DrmBackend) {
             last_redraw_ts = current_ts;
         }
 
-        // Battery polling
         if layers[active_layer].displays_battery {
             for button in &mut layers[active_layer].buttons {
                 if let ButtonImage::Battery(_, _, _) = button.1.image {
@@ -1149,7 +1271,6 @@ fn real_main(drm: &mut DrmBackend) {
                         match key.key_state() {
                             KeyState::Pressed => {
                                 fn_press_time = Some(std::time::Instant::now());
-                                // Hold Fn: peek at media layer (always last layer)
                                 if layers.len() > 1 {
                                     active_layer = layers.len() - 1;
                                     needs_complete_redraw = true;
@@ -1161,11 +1282,9 @@ fn real_main(drm: &mut DrmBackend) {
                                     .map(|t| t.elapsed().as_millis() < FN_TAP_THRESHOLD_MS)
                                     .unwrap_or(false);
                                 if was_tap {
-                                    // Tap: cycle to next layer, wrapping around
                                     fn_tap_layer = (fn_tap_layer + 1) % layers.len();
                                     active_layer = fn_tap_layer;
                                 } else {
-                                    // Hold released: snap back to latched layer
                                     active_layer = fn_tap_layer;
                                 }
                                 needs_complete_redraw = true;
@@ -1185,7 +1304,6 @@ fn real_main(drm: &mut DrmBackend) {
                                 layers[active_layer].hit(width, height, x, y, None)
                             {
                                 touches.insert(dn.seat_slot() as i32, (active_layer, btn));
-                                // Check if this is a Niri workspace button
                                 let is_niri_ws = matches!(
                                     layers[active_layer].buttons[btn].1.image,
                                     ButtonImage::NiriWorkspace { .. }

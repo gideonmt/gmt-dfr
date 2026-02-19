@@ -21,9 +21,9 @@ pub struct Theme {
     pub foreground:       (f64, f64, f64),
     pub button_inactive:  (f64, f64, f64),
     pub button_active:    (f64, f64, f64),
-    pub accent:           (f64, f64, f64), // focused workspace, active indicators
-    pub success:          (f64, f64, f64), // battery charging
-    pub warning:          (f64, f64, f64), // battery low
+    pub accent:           (f64, f64, f64),
+    pub success:          (f64, f64, f64),
+    pub warning:          (f64, f64, f64),
 }
 
 impl Default for Theme {
@@ -33,9 +33,9 @@ impl Default for Theme {
             foreground:      (1.0,   1.0,   1.0),
             button_inactive: (0.200, 0.200, 0.200),
             button_active:   (0.400, 0.400, 0.400),
-            accent:          (0.0,   0.514, 0.761), // base16 blue-ish
-            success:         (0.216, 0.663, 0.216), // base16 green-ish
-            warning:         (0.859, 0.196, 0.196), // base16 red-ish
+            accent:          (0.0,   0.514, 0.761),
+            success:         (0.216, 0.663, 0.216),
+            warning:         (0.859, 0.196, 0.196),
         }
     }
 }
@@ -53,6 +53,7 @@ pub struct Config {
     pub show_button_outlines: bool,
     pub enable_pixel_shift: bool,
     pub font_face: FontFace,
+    pub font_size: f64,
     pub adaptive_brightness: bool,
     pub active_brightness: u32,
     pub theme: Theme,
@@ -83,6 +84,7 @@ struct ConfigProxy {
     show_button_outlines: Option<bool>,
     enable_pixel_shift: Option<bool>,
     font_template: Option<String>,
+    font_size: Option<f64>,
     adaptive_brightness: Option<bool>,
     theme_background:      Option<String>,
     theme_foreground:      Option<String>,
@@ -93,8 +95,6 @@ struct ConfigProxy {
     theme_warning:         Option<String>,
     active_brightness: Option<u32>,
     primary_layer_keys: Option<Vec<ButtonConfig>>,
-    // Info layer is always present but starts empty; niri fills it at runtime.
-    // This field is kept for TOML override/fallback only.
     info_layer_keys: Option<Vec<ButtonConfig>>,
     media_layer_keys: Option<Vec<ButtonConfig>>,
 }
@@ -139,9 +139,11 @@ pub struct ButtonConfig {
     #[serde(deserialize_with = "array_or_single", default)]
     pub action: Vec<Key>,
     pub stretch: Option<usize>,
-    // special dynamic button types for the info layer
     pub niri_workspaces: Option<bool>,
     pub niri_window_title: Option<bool>,
+    pub volume: Option<bool>,
+    pub brightness: Option<bool>,
+    pub wifi: Option<bool>,
 }
 
 fn load_font(name: &str) -> FontFace {
@@ -171,6 +173,7 @@ fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
         base.show_button_outlines = user.show_button_outlines.or(base.show_button_outlines);
         base.enable_pixel_shift = user.enable_pixel_shift.or(base.enable_pixel_shift);
         base.font_template = user.font_template.or(base.font_template);
+        base.font_size = user.font_size.or(base.font_size);
         base.adaptive_brightness = user.adaptive_brightness.or(base.adaptive_brightness);
         base.media_layer_keys = user.media_layer_keys.or(base.media_layer_keys);
         base.info_layer_keys = user.info_layer_keys.or(base.info_layer_keys);
@@ -196,6 +199,7 @@ fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
                 icon: None, text: None, theme: None, time: None,
                 battery: None, locale: None, action: vec![],
                 niri_window_title: None,
+                volume: None, brightness: None, wifi: None,
             },
             ButtonConfig {
                 niri_window_title: Some(true),
@@ -203,6 +207,7 @@ fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
                 icon: None, text: None, theme: None, time: None,
                 battery: None, locale: None, action: vec![],
                 niri_workspaces: None,
+                volume: None, brightness: None, wifi: None,
             },
             ButtonConfig {
                 time: Some("%a %b %d %I:%M:%S %p".into()),
@@ -210,6 +215,7 @@ fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
                 icon: None, text: None, theme: None,
                 battery: None, locale: None, action: vec![],
                 niri_workspaces: None, niri_window_title: None,
+                volume: None, brightness: None, wifi: None,
             },
         ]
     });
@@ -229,6 +235,9 @@ fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
                     battery: None,
                     niri_workspaces: None,
                     niri_window_title: None,
+                    volume: None,
+                    brightness: None,
+                    wifi: None,
                 },
             );
         }
@@ -236,11 +245,9 @@ fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
 
     let fkey_layer = FunctionLayer::with_config(primary_layer_keys);
     let mut info_layer = FunctionLayer::with_config(info_layer_keys.clone());
-    // stored so rebuild_info_layer can re-expand dynamic entries on niri state changes
     info_layer.source_config = info_layer_keys;
     let media_layer = FunctionLayer::with_config(media_layer_keys);
 
-    // Fixed order: 0 = F-keys, 1 = Info, 2 = Media
     let layers = vec![fkey_layer, info_layer, media_layer];
 
     let theme = build_theme(
@@ -253,6 +260,7 @@ fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
         enable_pixel_shift: base.enable_pixel_shift.unwrap(),
         adaptive_brightness: base.adaptive_brightness.unwrap(),
         font_face: load_font(&base.font_template.unwrap()),
+        font_size: base.font_size.unwrap_or(26.0),
         active_brightness: base.active_brightness.unwrap(),
         theme,
     };
