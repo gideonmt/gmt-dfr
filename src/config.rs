@@ -27,6 +27,7 @@ pub struct Config {
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct ConfigProxy {
+    #[allow(dead_code)]
     media_layer_default: Option<bool>,
     show_button_outlines: Option<bool>,
     enable_pixel_shift: Option<bool>,
@@ -34,6 +35,7 @@ struct ConfigProxy {
     adaptive_brightness: Option<bool>,
     active_brightness: Option<u32>,
     primary_layer_keys: Option<Vec<ButtonConfig>>,
+    info_layer_keys: Option<Vec<ButtonConfig>>,
     media_layer_keys: Option<Vec<ButtonConfig>>,
 }
 
@@ -108,13 +110,26 @@ fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
         base.font_template = user.font_template.or(base.font_template);
         base.adaptive_brightness = user.adaptive_brightness.or(base.adaptive_brightness);
         base.media_layer_keys = user.media_layer_keys.or(base.media_layer_keys);
+        base.info_layer_keys = user.info_layer_keys.or(base.info_layer_keys);
         base.primary_layer_keys = user.primary_layer_keys.or(base.primary_layer_keys);
         base.active_brightness = user.active_brightness.or(base.active_brightness);
     };
     let mut media_layer_keys = base.media_layer_keys.unwrap();
     let mut primary_layer_keys = base.primary_layer_keys.unwrap();
+    let mut info_layer_keys = base.info_layer_keys.unwrap_or_else(|| {
+        vec![ButtonConfig {
+            icon: None,
+            text: None,
+            theme: None,
+            time: Some("%a %b %d %I:%M:%S %p".into()),
+            battery: None,
+            locale: None,
+            action: vec![],
+            stretch: Some(12),
+        }]
+    });
     if width >= 2170 {
-        for layer in [&mut media_layer_keys, &mut primary_layer_keys] {
+        for layer in [&mut media_layer_keys, &mut info_layer_keys, &mut primary_layer_keys] {
             layer.insert(
                 0,
                 ButtonConfig {
@@ -130,13 +145,10 @@ fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
             );
         }
     }
-    let media_layer = FunctionLayer::with_config(media_layer_keys);
     let fkey_layer = FunctionLayer::with_config(primary_layer_keys);
-    let layers = if base.media_layer_default.unwrap() {
-        vec![media_layer, fkey_layer]
-    } else {
-        vec![fkey_layer, media_layer]
-    };
+    let info_layer = FunctionLayer::with_config(info_layer_keys);
+    let media_layer = FunctionLayer::with_config(media_layer_keys);
+    let layers = vec![fkey_layer, info_layer, media_layer];
     let cfg = Config {
         show_button_outlines: base.show_button_outlines.unwrap(),
         enable_pixel_shift: base.enable_pixel_shift.unwrap(),

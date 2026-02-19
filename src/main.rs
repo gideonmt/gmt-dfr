@@ -41,12 +41,14 @@ mod backlight;
 mod config;
 mod display;
 mod fonts;
+mod niri;
 mod pixel_shift;
 
 use crate::config::ConfigManager;
 use backlight::BacklightManager;
 use config::{ButtonConfig, Config};
 use display::DrmBackend;
+use niri::NiriConnection;
 use pixel_shift::{PixelShiftManager, PIXEL_SHIFT_WIDTH_PX};
 
 const BUTTON_SPACING_PX: i32 = 16;
@@ -73,7 +75,7 @@ struct BatteryImages {
 enum BatteryIconMode {
     Percentage,
     Icon,
-    Both
+    Both,
 }
 
 impl BatteryIconMode {
@@ -91,6 +93,8 @@ enum ButtonImage {
     Bitmap(ImageSurface),
     Time(Vec<ChronoItem<'static>>, Locale),
     Battery(String, BatteryIconMode, BatteryImages),
+    NiriWorkspace { idx: u8, focused: bool },
+    NiriWindowTitle(String),
     Spacer,
 }
 
@@ -99,6 +103,8 @@ struct Button {
     changed: bool,
     active: bool,
     action: Vec<Key>,
+    /// If false, the button cannot be pressed: no visual highlight, no key events.
+    clickable: bool,
 }
 
 fn try_load_svg(path: &str) -> Result<ButtonImage> {
@@ -129,9 +135,7 @@ fn try_load_image(name: impl AsRef<str>, theme: Option<impl AsRef<str>>) -> Resu
     let name = name.as_ref();
     let locations;
 
-    // Load list of candidate locations
     if let Some(theme) = theme {
-        // Freedesktop icons
         let theme = theme.as_ref();
         let candidates = vec![
             lookup(name)
@@ -146,11 +150,8 @@ fn try_load_image(name: impl AsRef<str>, theme: Option<impl AsRef<str>>) -> Resu
                 .force_svg()
                 .find(),
         ];
-
-        // .flatten() removes `None` and unwraps `Some` values
         locations = candidates.into_iter().flatten().collect();
     } else {
-        // Standard file icons
         locations = vec![
             PathBuf::from(format!("/etc/tiny-dfr/{name}.svg")),
             PathBuf::from(format!("/etc/tiny-dfr/{name}.png")),
@@ -159,8 +160,7 @@ fn try_load_image(name: impl AsRef<str>, theme: Option<impl AsRef<str>>) -> Resu
         ];
     };
 
-    // Try to load each candidate
-    let mut last_err = anyhow!("no suitable icon path was found"); // in case locations is empty
+    let mut last_err = anyhow!("no suitable icon path was found");
 
     for location in locations {
         let result = match location.extension().and_then(|s| s.to_str()) {
@@ -181,8 +181,9 @@ fn try_load_image(name: impl AsRef<str>, theme: Option<impl AsRef<str>>) -> Resu
         };
     }
 
-    // if function hasn't returned by now, all sources have been exhausted
-    Err(last_err.context(format!("failed loading all possible paths for icon {name}")))
+    Err(last_err.context(format!(
+        "failed loading all possible paths for icon {name}"
+    )))
 }
 
 fn find_battery_device() -> Option<String> {
@@ -205,8 +206,7 @@ fn find_battery_device() -> Option<String> {
 
 fn get_battery_state(battery: &str) -> (u32, BatteryState) {
     let status_path = format!("/sys/class/power_supply/{}/status", battery);
-    let status = fs::read_to_string(&status_path)
-        .unwrap_or_else(|_| "Unknown".to_string());
+    let status = fs::read_to_string(&status_path).unwrap_or_else(|_| "Unknown".to_string());
 
     #[cfg(target_arch = "x86_64")]
     let capacity = {
@@ -233,12 +233,12 @@ fn get_battery_state(battery: &str) -> (u32, BatteryState) {
             .unwrap_or(100)
     };
 
-    let status = match status.trim() {
+    let state = match status.trim() {
         "Charging" | "Full" => BatteryState::Charging,
         "Discharging" if capacity < 10 => BatteryState::Low,
         _ => BatteryState::NotCharging,
     };
-    (capacity, status)
+    (capacity, state)
 }
 
 impl Button {
@@ -259,51 +259,78 @@ impl Button {
             Button::new_spacer()
         }
     }
+
     fn new_spacer() -> Button {
         Button {
             action: vec![],
             active: false,
             changed: false,
+            clickable: true,
             image: ButtonImage::Spacer,
         }
     }
+
     fn new_text(text: String, action: Vec<Key>) -> Button {
         Button {
             action,
             active: false,
             changed: false,
+            clickable: true,
             image: ButtonImage::Text(text),
         }
     }
-    fn new_icon(path: impl AsRef<str>, theme: Option<impl AsRef<str>>, action: Vec<Key>) -> Button {
+
+    fn new_icon(
+        path: impl AsRef<str>,
+        theme: Option<impl AsRef<str>>,
+        action: Vec<Key>,
+    ) -> Button {
         let image = try_load_image(path, theme).expect("failed to load icon");
         Button {
             action,
             image,
             active: false,
             changed: false,
+            clickable: true,
         }
     }
+
     fn load_battery_image(icon: &str, theme: Option<impl AsRef<str>>) -> Handle {
         if let ButtonImage::Svg(svg) = try_load_image(icon, theme).unwrap() {
             return svg;
         }
         panic!("failed to load icon");
     }
-    fn new_battery(action: Vec<Key>, battery: String, battery_mode: String, theme: Option<impl AsRef<str>>) -> Button {
+
+    fn new_battery(
+        action: Vec<Key>,
+        battery: String,
+        battery_mode: String,
+        theme: Option<impl AsRef<str>>,
+    ) -> Button {
         let bolt = Self::load_battery_image("bolt", theme.as_ref());
         let mut plain = Vec::new();
         let mut charging = Vec::new();
         for icon in [
-            "battery_0_bar", "battery_1_bar", "battery_2_bar", "battery_3_bar",
-            "battery_4_bar", "battery_5_bar", "battery_6_bar", "battery_full",
+            "battery_0_bar",
+            "battery_1_bar",
+            "battery_2_bar",
+            "battery_3_bar",
+            "battery_4_bar",
+            "battery_5_bar",
+            "battery_6_bar",
+            "battery_full",
         ] {
             plain.push(Self::load_battery_image(icon, theme.as_ref()));
         }
         for icon in [
-            "battery_charging_20", "battery_charging_30", "battery_charging_50",
-            "battery_charging_60", "battery_charging_80",
-            "battery_charging_90", "battery_charging_full",
+            "battery_charging_20",
+            "battery_charging_30",
+            "battery_charging_50",
+            "battery_charging_60",
+            "battery_charging_80",
+            "battery_charging_90",
+            "battery_charging_full",
         ] {
             charging.push(Self::load_battery_image(icon, theme.as_ref()));
         }
@@ -317,9 +344,16 @@ impl Button {
             action,
             active: false,
             changed: false,
-            image: ButtonImage::Battery(battery, battery_mode, BatteryImages {
-                plain, bolt, charging
-            }),
+            clickable: true,
+            image: ButtonImage::Battery(
+                battery,
+                battery_mode,
+                BatteryImages {
+                    plain,
+                    bolt,
+                    charging,
+                },
+            ),
         }
     }
 
@@ -334,32 +368,60 @@ impl Button {
 
         let format_items = match StrftimeItems::new(format_str).parse_to_owned() {
             Ok(s) => s,
-            Err(e) => panic!("Invalid time format, consult the configuration file for examples of correct ones: {e:?}"),
+            Err(e) => panic!("Invalid time format: {e:?}"),
         };
 
-        let locale = locale_str.and_then(|l| Locale::try_from(l).ok()).unwrap_or(Locale::POSIX);
+        let locale = locale_str
+            .and_then(|l| Locale::try_from(l).ok())
+            .unwrap_or(Locale::POSIX);
         Button {
             action,
             active: false,
             changed: false,
+            clickable: false,
             image: ButtonImage::Time(format_items, locale),
         }
     }
+
+    fn new_niri_workspace(idx: u8, focused: bool, id: u64) -> Button {
+        // Store id encoded in action as a sentinel — actual switching is done
+        // via NiriConnection, not uinput. We use a dummy key slot and intercept
+        // in the touch handler instead.
+        let _ = id; // id is used in touch handler via layer state, not here
+        Button {
+            action: vec![],
+            active: false,
+            changed: true,
+            clickable: true,
+            image: ButtonImage::NiriWorkspace { idx, focused },
+        }
+    }
+
+    fn new_niri_window_title(title: String) -> Button {
+        Button {
+            action: vec![],
+            active: false,
+            changed: true,
+            clickable: false,
+            image: ButtonImage::NiriWindowTitle(title),
+        }
+    }
+
     fn needs_faster_refresh(&self) -> bool {
         match &self.image {
-            ButtonImage::Time(items, _) =>
-                items.iter().any(|item| {
-                    use chrono::format::{Item, Numeric};
-                    match item {
-                        Item::Numeric(Numeric::Second, _) |
-                        Item::Numeric(Numeric::Nanosecond, _) |
-                        Item::Numeric(Numeric::Timestamp, _) => true,
-                        _ => false,
-                    }
-                }),
+            ButtonImage::Time(items, _) => items.iter().any(|item| {
+                use chrono::format::{Item, Numeric};
+                matches!(
+                    item,
+                    Item::Numeric(Numeric::Second, _)
+                        | Item::Numeric(Numeric::Nanosecond, _)
+                        | Item::Numeric(Numeric::Timestamp, _)
+                )
+            }),
             _ => false,
         }
     }
+
     fn render(
         &self,
         c: &Context,
@@ -372,22 +434,22 @@ impl Button {
             ButtonImage::Text(text) => {
                 let extents = c.text_extents(text).unwrap();
                 c.move_to(
-                    button_left_edge + (button_width as f64 / 2.0 - extents.width() / 2.0).round(),
+                    button_left_edge
+                        + (button_width as f64 / 2.0 - extents.width() / 2.0).round(),
                     y_shift + (height as f64 / 2.0 + extents.height() / 2.0).round(),
                 );
                 c.show_text(text).unwrap();
             }
             ButtonImage::Svg(svg) => {
-                let x =
-                    button_left_edge + (button_width as f64 / 2.0 - (ICON_SIZE / 2) as f64).round();
+                let x = button_left_edge
+                    + (button_width as f64 / 2.0 - (ICON_SIZE / 2) as f64).round();
                 let y = y_shift + ((height as f64 - ICON_SIZE as f64) / 2.0).round();
-
                 svg.render_document(c, &Rectangle::new(x, y, ICON_SIZE as f64, ICON_SIZE as f64))
                     .unwrap();
             }
             ButtonImage::Bitmap(surf) => {
-                let x =
-                    button_left_edge + (button_width as f64 / 2.0 - (ICON_SIZE / 2) as f64).round();
+                let x = button_left_edge
+                    + (button_width as f64 / 2.0 - (ICON_SIZE / 2) as f64).round();
                 let y = y_shift + ((height as f64 - ICON_SIZE as f64) / 2.0).round();
                 c.set_source_surface(surf, x, y).unwrap();
                 c.rectangle(x, y, ICON_SIZE as f64, ICON_SIZE as f64);
@@ -395,13 +457,67 @@ impl Button {
             }
             ButtonImage::Time(format, locale) => {
                 let current_time = Local::now();
-                let formatted_time = current_time.format_localized_with_items(format.iter(), *locale).to_string();
+                let formatted_time = current_time
+                    .format_localized_with_items(format.iter(), *locale)
+                    .to_string();
                 let time_extents = c.text_extents(&formatted_time).unwrap();
                 c.move_to(
-                    button_left_edge + (button_width as f64 / 2.0 - time_extents.width() / 2.0).round(),
-                    y_shift + (height as f64 / 2.0 + time_extents.height() / 2.0).round()
+                    button_left_edge
+                        + (button_width as f64 / 2.0 - time_extents.width() / 2.0).round(),
+                    y_shift + (height as f64 / 2.0 + time_extents.height() / 2.0).round(),
                 );
                 c.show_text(&formatted_time).unwrap();
+            }
+            ButtonImage::NiriWorkspace { idx, .. } => {
+                let label = idx.to_string();
+                let extents = c.text_extents(&label).unwrap();
+                c.move_to(
+                    button_left_edge
+                        + (button_width as f64 / 2.0 - extents.width() / 2.0).round(),
+                    y_shift + (height as f64 / 2.0 + extents.height() / 2.0).round(),
+                );
+                c.show_text(&label).unwrap();
+            }
+            ButtonImage::NiriWindowTitle(title) => {
+                // Truncate title to fit within button width, appending "…" if needed
+                let max_w = button_width as f64 - 16.0;
+                let full_extents = c.text_extents(title).unwrap();
+                if full_extents.width() <= max_w {
+                    let extents = c.text_extents(title).unwrap();
+                    c.move_to(
+                        button_left_edge
+                            + (button_width as f64 / 2.0 - extents.width() / 2.0).round(),
+                        y_shift + (height as f64 / 2.0 + extents.height() / 2.0).round(),
+                    );
+                    c.show_text(title).unwrap();
+                } else {
+                    // Binary-search for the longest prefix that fits with "…"
+                    let ellipsis = "…";
+                    let ellipsis_w = c.text_extents(ellipsis).unwrap().width();
+                    let char_indices: Vec<_> = title.char_indices().collect();
+                    let mut lo = 0usize;
+                    let mut hi = char_indices.len();
+                    while lo + 1 < hi {
+                        let mid = (lo + hi) / 2;
+                        let byte_end = char_indices[mid].0;
+                        let candidate = &title[..byte_end];
+                        let w = c.text_extents(candidate).unwrap().width();
+                        if w + ellipsis_w <= max_w {
+                            lo = mid;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                    let byte_end = char_indices.get(lo).map(|(i, _)| *i).unwrap_or(0);
+                    let truncated = format!("{}{}", &title[..byte_end], ellipsis);
+                    let extents = c.text_extents(&truncated).unwrap();
+                    c.move_to(
+                        button_left_edge
+                            + (button_width as f64 / 2.0 - extents.width() / 2.0).round(),
+                        y_shift + (height as f64 / 2.0 + extents.height() / 2.0).round(),
+                    );
+                    c.show_text(&truncated).unwrap();
+                }
             }
             ButtonImage::Battery(battery, battery_mode, icons) => {
                 let (capacity, state) = get_battery_state(battery);
@@ -446,13 +562,18 @@ impl Button {
                     let x =
                         button_left_edge + (button_width as f64 / 2.0 - width / 2.0).round();
                     let y = y_shift + ((height as f64 - ICON_SIZE as f64) / 2.0).round();
-
-                    svg.render_document(c, &Rectangle::new(x, y, ICON_SIZE as f64, ICON_SIZE as f64))
-                        .unwrap();
+                    svg.render_document(
+                        c,
+                        &Rectangle::new(x, y, ICON_SIZE as f64, ICON_SIZE as f64),
+                    )
+                    .unwrap();
                 }
                 if battery_mode.should_draw_text() {
                     c.move_to(
-                        button_left_edge + (button_width as f64 / 2.0 - width / 2.0 + text_offset as f64).round(),
+                        button_left_edge
+                            + (button_width as f64 / 2.0 - width / 2.0
+                                + text_offset as f64)
+                                .round(),
                         y_shift + (height as f64 / 2.0 + extents.height() / 2.0).round(),
                     );
                     c.show_text(&percent_str).unwrap();
@@ -461,27 +582,46 @@ impl Button {
             ButtonImage::Spacer => (),
         }
     }
+
     fn set_active<F>(&mut self, uinput: &mut UInputHandle<F>, active: bool)
     where
         F: AsRawFd,
     {
+        // Non-clickable buttons never respond to touch
+        if !self.clickable {
+            return;
+        }
         if self.active != active {
             self.active = active;
             self.changed = true;
-
             toggle_keys(uinput, &self.action, active as i32);
         }
     }
+
     fn set_background_color(&self, c: &Context, color: f64) {
-        if let ButtonImage::Battery(battery, _, _) = &self.image {
-            let (_, state) = get_battery_state(battery);
-            match state {
-                BatteryState::NotCharging => c.set_source_rgb(color, color, color),
-                BatteryState::Charging => c.set_source_rgb(0.0, color, 0.0),
-                BatteryState::Low => c.set_source_rgb(color, 0.0, 0.0),
+        if !self.clickable {
+            // Display-only buttons: no background box drawn at all (caller checks clickable)
+            c.set_source_rgb(0.0, 0.0, 0.0);
+            return;
+        }
+        match &self.image {
+            ButtonImage::Battery(battery, _, _) => {
+                let (_, state) = get_battery_state(battery);
+                match state {
+                    BatteryState::NotCharging => c.set_source_rgb(color, color, color),
+                    BatteryState::Charging => c.set_source_rgb(0.0, color * 1.8, 0.0),
+                    BatteryState::Low => c.set_source_rgb(color * 1.8, 0.0, 0.0),
+                }
             }
-        } else {
-            c.set_source_rgb(color, color, color);
+            ButtonImage::NiriWorkspace { focused, .. } => {
+                if *focused {
+                    // Focused workspace: teal/cyan highlight
+                    c.set_source_rgb(0.0, color * 2.0, color * 2.0);
+                } else {
+                    c.set_source_rgb(color, color, color);
+                }
+            }
+            _ => c.set_source_rgb(color, color, color),
         }
     }
 }
@@ -490,9 +630,12 @@ impl Button {
 pub struct FunctionLayer {
     displays_time: bool,
     displays_battery: bool,
-    buttons: Vec<(usize, Button)>,
-    virtual_button_count: usize,
+    pub buttons: Vec<(usize, Button)>,
+    pub virtual_button_count: usize,
     faster_refresh: bool,
+    /// Workspace ids parallel to buttons that are NiriWorkspace variants,
+    /// so the touch handler can call focus_workspace without storing id in Key.
+    pub niri_workspace_ids: Vec<(usize, u64)>, // (button index, niri workspace id)
 }
 
 impl FunctionLayer {
@@ -524,8 +667,10 @@ impl FunctionLayer {
             buttons,
             virtual_button_count,
             faster_refresh,
+            niri_workspace_ids: vec![],
         }
     }
+
     fn draw(
         &mut self,
         config: &Config,
@@ -593,6 +738,7 @@ impl FunctionLayer {
             } else {
                 0.0
             };
+
             if !complete_redraw {
                 c.set_source_rgb(0.0, 0.0, 0.0);
                 c.rectangle(
@@ -603,51 +749,23 @@ impl FunctionLayer {
                 );
                 c.fill().unwrap();
             }
-            if !matches!(button.image, ButtonImage::Spacer) {
+
+            // Only draw the button box for clickable, non-spacer buttons
+            if !matches!(button.image, ButtonImage::Spacer) && button.clickable {
                 button.set_background_color(&c, color);
-                // draw box with rounded corners
                 c.new_sub_path();
                 let left = left_edge + radius;
                 let right = (left_edge + button_width.ceil()) - radius;
-                c.arc(
-                    right,
-                    bot,
-                    radius,
-                    (-90.0f64).to_radians(),
-                    (0.0f64).to_radians(),
-                );
-                c.arc(
-                    right,
-                    top,
-                    radius,
-                    (0.0f64).to_radians(),
-                    (90.0f64).to_radians(),
-                );
-                c.arc(
-                    left,
-                    top,
-                    radius,
-                    (90.0f64).to_radians(),
-                    (180.0f64).to_radians(),
-                );
-                c.arc(
-                    left,
-                    bot,
-                    radius,
-                    (180.0f64).to_radians(),
-                    (270.0f64).to_radians(),
-                );
+                c.arc(right, bot, radius, (-90.0f64).to_radians(), (0.0f64).to_radians());
+                c.arc(right, top, radius, (0.0f64).to_radians(), (90.0f64).to_radians());
+                c.arc(left, top, radius, (90.0f64).to_radians(), (180.0f64).to_radians());
+                c.arc(left, bot, radius, (180.0f64).to_radians(), (270.0f64).to_radians());
                 c.close_path();
                 c.fill().unwrap();
             }
+
             c.set_source_rgb(1.0, 1.0, 1.0);
-            button.render(
-                &c,
-                height,
-                left_edge,
-                button_width.ceil() as u64,
-                pixel_shift_y,
-            );
+            button.render(&c, height, left_edge, button_width.ceil() as u64, pixel_shift_y);
 
             button.changed = false;
 
@@ -681,6 +799,11 @@ impl FunctionLayer {
             return None;
         }
 
+        // Non-clickable buttons cannot be hit
+        if !self.buttons[i].1.clickable {
+            return None;
+        }
+
         let start = self.buttons[i].0;
         let end = if i + 1 < self.buttons.len() {
             self.buttons[i + 1].0
@@ -689,7 +812,6 @@ impl FunctionLayer {
         };
 
         let left_edge = (start as f64 * (virtual_button_width + BUTTON_SPACING_PX as f64)).floor();
-
         let button_width = virtual_button_width
             + ((end - start - 1) as f64 * (virtual_button_width + BUTTON_SPACING_PX as f64))
                 .floor();
@@ -706,12 +828,67 @@ impl FunctionLayer {
     }
 }
 
+/// Rebuild the info layer (index 1) from live Niri state.
+/// Layout: [ws1][ws2]...[wsN][     window title     ][clock]
+fn rebuild_info_layer(layers: &mut Vec<FunctionLayer>, niri_state: &niri::NiriState) {
+    let Some(layer) = layers.get_mut(1) else {
+        return;
+    };
+
+    let ws_count = niri_state.workspaces.len();
+    // Workspace buttons each get 1 virtual slot.
+    // Window title gets a generous stretch. Clock gets 4 slots.
+    let title_stretch = 6usize;
+    let clock_stretch = 4usize;
+    let total = ws_count + title_stretch + clock_stretch;
+
+    let mut buttons: Vec<(usize, Button)> = Vec::new();
+    let mut niri_workspace_ids: Vec<(usize, u64)> = Vec::new();
+    let mut virt = 0usize;
+
+    for ws in &niri_state.workspaces {
+        let btn = Button::new_niri_workspace(ws.idx, ws.is_focused, ws.id);
+        let btn_index = buttons.len();
+        niri_workspace_ids.push((btn_index, ws.id));
+        buttons.push((virt, btn));
+        virt += 1;
+    }
+
+    let title = niri_state
+        .focused_window_title
+        .clone()
+        .unwrap_or_default();
+    buttons.push((virt, Button::new_niri_window_title(title)));
+    virt += title_stretch;
+
+    // Clock (non-clickable)
+    let clock_format = StrftimeItems::new("%a %b %d %I:%M:%S %p")
+        .parse_to_owned()
+        .expect("valid clock format");
+    buttons.push((
+        virt,
+        Button {
+            action: vec![],
+            active: false,
+            changed: true,
+            clickable: false,
+            image: ButtonImage::Time(clock_format, Locale::POSIX),
+        },
+    ));
+    virt += clock_stretch;
+
+    layer.buttons = buttons;
+    layer.virtual_button_count = total.max(virt);
+    layer.niri_workspace_ids = niri_workspace_ids;
+    layer.displays_time = true;
+    layer.faster_refresh = true; // clock has seconds
+}
+
 struct Interface;
 
 impl LibinputInterface for Interface {
     fn open_restricted(&mut self, path: &Path, flags: i32) -> Result<OwnedFd, i32> {
         let mode = flags & O_ACCMODE;
-
         OpenOptions::new()
             .custom_flags(flags)
             .read(mode == O_RDONLY || mode == O_RDWR)
@@ -795,9 +972,16 @@ fn real_main(drm: &mut DrmBackend) {
     let (mut cfg, mut layers) = cfg_mgr.load_config(width);
     let mut pixel_shift = PixelShiftManager::new();
 
-    // drop privileges to input and video group
-    let groups = ["input", "video"];
+    // Connect to Niri event stream (optional — graceful if not running under Niri)
+    let mut niri: Option<NiriConnection> = NiriConnection::connect().ok();
 
+    // connect() already blocked until initial WorkspacesChanged arrived.
+    if let Some(ref n) = niri {
+        rebuild_info_layer(&mut layers, &n.state);
+    }
+
+    // Drop privileges to input and video group
+    let groups = ["input", "video"];
     PrivDrop::default()
         .user("nobody")
         .group_list(&groups)
@@ -806,8 +990,8 @@ fn real_main(drm: &mut DrmBackend) {
 
     let mut surface =
         ImageSurface::create(Format::ARgb32, db_width as i32, db_height as i32).unwrap();
-    let mut active_layer = 0;
-    let mut fn_tap_layer: usize = 0;
+    let mut active_layer = 0usize;
+    let mut fn_tap_layer = 0usize;
     let mut fn_press_time: Option<std::time::Instant> = None;
     let mut needs_complete_redraw = true;
 
@@ -815,12 +999,14 @@ fn real_main(drm: &mut DrmBackend) {
     let mut input_main = Libinput::new_with_udev(Interface);
     input_tb.udev_assign_seat("seat-touchbar").unwrap();
     input_main.udev_assign_seat("seat0").unwrap();
+
     let udev_monitor = MonitorBuilder::new()
         .unwrap()
         .match_subsystem("power_supply")
         .unwrap()
         .listen()
         .unwrap();
+
     let epoll = Epoll::new(EpollCreateFlags::empty()).unwrap();
     epoll
         .add(input_main.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 0))
@@ -834,6 +1020,12 @@ fn real_main(drm: &mut DrmBackend) {
     epoll
         .add(&udev_monitor, EpollEvent::new(EpollFlags::EPOLLIN, 3))
         .unwrap();
+    if let Some(ref n) = niri {
+        epoll
+            .add(n, EpollEvent::new(EpollFlags::EPOLLIN, 4))
+            .unwrap();
+    }
+
     uinput.set_evbit(EventKind::Key).unwrap();
     for layer in &layers {
         for button in &layer.buttons {
@@ -842,6 +1034,7 @@ fn real_main(drm: &mut DrmBackend) {
             }
         }
     }
+
     let mut dev_name_c = [0 as c_char; 80];
     let dev_name = "Dynamic Function Row Virtual Input Device".as_bytes();
     for i in 0..dev_name.len() {
@@ -862,16 +1055,33 @@ fn real_main(drm: &mut DrmBackend) {
     uinput.dev_create().unwrap();
 
     let mut digitizer: Option<InputDevice> = None;
-    let mut touches = HashMap::new();
+    let mut touches: HashMap<i32, (usize, usize)> = HashMap::new();
     let mut last_redraw_ts = if layers[active_layer].faster_refresh {
         Local::now().second()
     } else {
         Local::now().minute()
     };
+
     loop {
+        // Config reload
         if cfg_mgr.update_config(&mut cfg, &mut layers, width) {
             active_layer = 0;
+            fn_tap_layer = 0;
             needs_complete_redraw = true;
+            // Re-populate info layer from cached niri state after config reload
+            if let Some(ref n) = niri {
+                rebuild_info_layer(&mut layers, &n.state);
+            }
+        }
+
+        // Niri events
+        if let Some(ref mut n) = niri {
+            if n.process_events() {
+                rebuild_info_layer(&mut layers, &n.state);
+                if active_layer == 1 {
+                    needs_complete_redraw = true;
+                }
+            }
         }
 
         let now = Local::now();
@@ -886,6 +1096,7 @@ fn real_main(drm: &mut DrmBackend) {
             next_timeout_ms = min(next_timeout_ms, pixel_shift_next_timeout_ms);
         }
 
+        // When on the info layer with seconds, redraw every second
         let current_ts = if layers[active_layer].faster_refresh {
             Local::now().second()
         } else {
@@ -895,6 +1106,8 @@ fn real_main(drm: &mut DrmBackend) {
             needs_complete_redraw = true;
             last_redraw_ts = current_ts;
         }
+
+        // Battery polling
         if layers[active_layer].displays_battery {
             for button in &mut layers[active_layer].buttons {
                 if let ButtonImage::Battery(_, _, _) = button.1.image {
@@ -949,9 +1162,9 @@ fn real_main(drm: &mut DrmBackend) {
                         match key.key_state() {
                             KeyState::Pressed => {
                                 fn_press_time = Some(std::time::Instant::now());
-                                // peek at layer 1 while held
+                                // Hold Fn: peek at media layer (always last layer)
                                 if layers.len() > 1 {
-                                    active_layer = 1;
+                                    active_layer = layers.len() - 1;
                                     needs_complete_redraw = true;
                                 }
                             }
@@ -961,11 +1174,11 @@ fn real_main(drm: &mut DrmBackend) {
                                     .map(|t| t.elapsed().as_millis() < FN_TAP_THRESHOLD_MS)
                                     .unwrap_or(false);
                                 if was_tap {
-                                    // cycle to next layer, wrapping around
+                                    // Tap: cycle to next layer, wrapping around
                                     fn_tap_layer = (fn_tap_layer + 1) % layers.len();
                                     active_layer = fn_tap_layer;
                                 } else {
-                                    // held: snap back to latched layer
+                                    // Hold released: snap back to latched layer
                                     active_layer = fn_tap_layer;
                                 }
                                 needs_complete_redraw = true;
@@ -981,32 +1194,52 @@ fn real_main(drm: &mut DrmBackend) {
                         TouchEvent::Down(dn) => {
                             let x = dn.x_transformed(width as u32);
                             let y = dn.y_transformed(height as u32);
-                            if let Some(btn) = layers[active_layer].hit(width, height, x, y, None) {
-                                touches.insert(dn.seat_slot(), (active_layer, btn));
-                                layers[active_layer].buttons[btn]
-                                    .1
-                                    .set_active(&mut uinput, true);
+                            if let Some(btn) =
+                                layers[active_layer].hit(width, height, x, y, None)
+                            {
+                                touches.insert(dn.seat_slot() as i32, (active_layer, btn));
+                                // Check if this is a Niri workspace button
+                                let is_niri_ws = matches!(
+                                    layers[active_layer].buttons[btn].1.image,
+                                    ButtonImage::NiriWorkspace { .. }
+                                );
+                                if is_niri_ws {
+                                    // Find the workspace id for this button index
+                                    if let Some(ref n) = niri {
+                                        if let Some(&(_, ws_id)) = layers[active_layer]
+                                            .niri_workspace_ids
+                                            .iter()
+                                            .find(|&&(bi, _)| bi == btn)
+                                        {
+                                            n.focus_workspace(ws_id as u64);
+                                        }
+                                    }
+                                } else {
+                                    layers[active_layer].buttons[btn]
+                                        .1
+                                        .set_active(&mut uinput, true);
+                                }
                             }
                         }
                         TouchEvent::Motion(mtn) => {
-                            if !touches.contains_key(&mtn.seat_slot()) {
+                            if !touches.contains_key(&(mtn.seat_slot() as i32)) {
                                 continue;
                             }
-
                             let x = mtn.x_transformed(width as u32);
                             let y = mtn.y_transformed(height as u32);
-                            let (layer, btn) = *touches.get(&mtn.seat_slot()).unwrap();
+                            let (layer, btn) = *touches.get(&(mtn.seat_slot() as i32)).unwrap();
                             let hit = layers[active_layer]
                                 .hit(width, height, x, y, Some(btn))
                                 .is_some();
                             layers[layer].buttons[btn].1.set_active(&mut uinput, hit);
                         }
                         TouchEvent::Up(up) => {
-                            if !touches.contains_key(&up.seat_slot()) {
+                            if !touches.contains_key(&(up.seat_slot() as i32)) {
                                 continue;
                             }
-                            let (layer, btn) = *touches.get(&up.seat_slot()).unwrap();
+                            let (layer, btn) = *touches.get(&(up.seat_slot() as i32)).unwrap();
                             layers[layer].buttons[btn].1.set_active(&mut uinput, false);
+                            touches.remove(&(up.seat_slot() as i32));
                         }
                         _ => {}
                     }
