@@ -35,6 +35,16 @@ AdaptiveBrightness = true
 # Accepted values are 0-255
 ActiveBrightness = 128
 
+# Color scheme
+# Colors from Oxocarbon Dark by shaunsingh/IBM
+ThemeBackground     = "#161616"  # base00
+ThemeForeground     = "#f2f4f8"  # base05
+ThemeButtonInactive = "#393939"  # base02
+ThemeButtonActive   = "#525252"  # base03
+ThemeAccent         = "#42be65"  # base0D — focused workspace
+ThemeSuccess        = "#33b1ff"  # base0B — battery charging
+ThemeWarning        = "#3ddbd9"  # base08 — battery low 
+
 # This key defines the contents of the primary layer
 # (the one with F{number} keys)
 # You can change the individual buttons, add, or remove them

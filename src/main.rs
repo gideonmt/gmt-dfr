@@ -51,8 +51,6 @@ use display::DrmBackend;
 use pixel_shift::{PixelShiftManager, PIXEL_SHIFT_WIDTH_PX};
 
 const BUTTON_SPACING_PX: i32 = 16;
-const BUTTON_COLOR_INACTIVE: f64 = 0.200;
-const BUTTON_COLOR_ACTIVE: f64 = 0.400;
 const ICON_SIZE: i32 = 48;
 const TIMEOUT_MS: i32 = 10 * 1000;
 const FN_TAP_THRESHOLD_MS: u128 = 300;
@@ -597,30 +595,26 @@ impl Button {
         }
     }
 
-    fn set_background_color(&self, c: &Context, color: f64) {
-        if !self.clickable {
-            // Display-only buttons: no background box drawn at all (caller checks clickable)
-            c.set_source_rgb(0.0, 0.0, 0.0);
-            return;
-        }
+    fn set_background_color(&self, c: &Context, active: bool, theme: &crate::config::Theme) {
+        let (r, g, b) = if active { theme.button_active } else { theme.button_inactive };
         match &self.image {
             ButtonImage::Battery(battery, _, _) => {
                 let (_, state) = get_battery_state(battery);
                 match state {
-                    BatteryState::NotCharging => c.set_source_rgb(color, color, color),
-                    BatteryState::Charging => c.set_source_rgb(0.0, color * 1.8, 0.0),
-                    BatteryState::Low => c.set_source_rgb(color * 1.8, 0.0, 0.0),
+                    BatteryState::NotCharging => c.set_source_rgb(r, g, b),
+                    BatteryState::Charging    => { let (r,g,b) = theme.success; c.set_source_rgb(r, g, b); }
+                    BatteryState::Low         => { let (r,g,b) = theme.warning; c.set_source_rgb(r, g, b); }
                 }
             }
             ButtonImage::NiriWorkspace { focused, .. } => {
                 if *focused {
-                    // Focused workspace: teal/cyan highlight
-                    c.set_source_rgb(0.0, color * 2.0, color * 2.0);
+                    let (r,g,b) = theme.accent;
+                    c.set_source_rgb(r, g, b);
                 } else {
-                    c.set_source_rgb(color, color, color);
+                    c.set_source_rgb(r, g, b);
                 }
             }
-            _ => c.set_source_rgb(color, color, color),
+            _ => c.set_source_rgb(r, g, b),
         }
     }
 }
@@ -703,7 +697,8 @@ impl FunctionLayer {
         let (pixel_shift_x, pixel_shift_y) = pixel_shift;
 
         if complete_redraw {
-            c.set_source_rgb(0.0, 0.0, 0.0);
+            let (r,g,b) = config.theme.background;
+            c.set_source_rgb(r, g, b);
             c.paint().unwrap();
         }
         c.set_font_face(&config.font_face);
@@ -731,16 +726,9 @@ impl FunctionLayer {
                 + ((end - start - 1) as f64 * (virtual_button_width + BUTTON_SPACING_PX as f64))
                     .floor();
 
-            let color = if button.active {
-                BUTTON_COLOR_ACTIVE
-            } else if config.show_button_outlines {
-                BUTTON_COLOR_INACTIVE
-            } else {
-                0.0
-            };
-
             if !complete_redraw {
-                c.set_source_rgb(0.0, 0.0, 0.0);
+                let (r,g,b) = config.theme.background;
+                c.set_source_rgb(r, g, b);
                 c.rectangle(
                     left_edge,
                     bot - radius,
@@ -750,9 +738,11 @@ impl FunctionLayer {
                 c.fill().unwrap();
             }
 
-            // Only draw the button box for clickable, non-spacer buttons
-            if !matches!(button.image, ButtonImage::Spacer) && button.clickable {
-                button.set_background_color(&c, color);
+            // only draw box for clickable non-spacer buttons
+            let draw_active = button.active;
+            let draw_outline = config.show_button_outlines || button.active;
+            if !matches!(button.image, ButtonImage::Spacer) && button.clickable && draw_outline {
+                button.set_background_color(&c, draw_active, &config.theme);
                 c.new_sub_path();
                 let left = left_edge + radius;
                 let right = (left_edge + button_width.ceil()) - radius;
@@ -764,7 +754,8 @@ impl FunctionLayer {
                 c.fill().unwrap();
             }
 
-            c.set_source_rgb(1.0, 1.0, 1.0);
+            let (r,g,b) = config.theme.foreground;
+            c.set_source_rgb(r, g, b);
             button.render(&c, height, left_edge, button_width.ceil() as u64, pixel_shift_y);
 
             button.changed = false;

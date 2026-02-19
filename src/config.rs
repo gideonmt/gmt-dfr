@@ -16,12 +16,63 @@ use std::{fmt, fs::read_to_string, os::fd::AsFd};
 
 const USER_CFG_PATH: &str = "/etc/tiny-dfr/config.toml";
 
+pub struct Theme {
+    pub background:       (f64, f64, f64),
+    pub foreground:       (f64, f64, f64),
+    pub button_inactive:  (f64, f64, f64),
+    pub button_active:    (f64, f64, f64),
+    pub accent:           (f64, f64, f64), // focused workspace, active indicators
+    pub success:          (f64, f64, f64), // battery charging
+    pub warning:          (f64, f64, f64), // battery low
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Theme {
+            background:      (0.0,   0.0,   0.0),
+            foreground:      (1.0,   1.0,   1.0),
+            button_inactive: (0.200, 0.200, 0.200),
+            button_active:   (0.400, 0.400, 0.400),
+            accent:          (0.0,   0.514, 0.761), // base16 blue-ish
+            success:         (0.216, 0.663, 0.216), // base16 green-ish
+            warning:         (0.859, 0.196, 0.196), // base16 red-ish
+        }
+    }
+}
+
+fn hex_to_rgb(s: &str) -> Option<(f64, f64, f64)> {
+    let s = s.trim_start_matches('#');
+    if s.len() != 6 { return None; }
+    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+    Some((r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0))
+}
+
 pub struct Config {
     pub show_button_outlines: bool,
     pub enable_pixel_shift: bool,
     pub font_face: FontFace,
     pub adaptive_brightness: bool,
     pub active_brightness: u32,
+    pub theme: Theme,
+}
+
+fn build_theme(
+    background: Option<String>, foreground: Option<String>,
+    button_inactive: Option<String>, button_active: Option<String>,
+    accent: Option<String>, success: Option<String>, warning: Option<String>,
+) -> Theme {
+    let d = Theme::default();
+    Theme {
+        background:      background.as_deref().and_then(hex_to_rgb).unwrap_or(d.background),
+        foreground:      foreground.as_deref().and_then(hex_to_rgb).unwrap_or(d.foreground),
+        button_inactive: button_inactive.as_deref().and_then(hex_to_rgb).unwrap_or(d.button_inactive),
+        button_active:   button_active.as_deref().and_then(hex_to_rgb).unwrap_or(d.button_active),
+        accent:          accent.as_deref().and_then(hex_to_rgb).unwrap_or(d.accent),
+        success:         success.as_deref().and_then(hex_to_rgb).unwrap_or(d.success),
+        warning:         warning.as_deref().and_then(hex_to_rgb).unwrap_or(d.warning),
+    }
 }
 
 #[derive(Deserialize)]
@@ -33,6 +84,13 @@ struct ConfigProxy {
     enable_pixel_shift: Option<bool>,
     font_template: Option<String>,
     adaptive_brightness: Option<bool>,
+    theme_background:      Option<String>,
+    theme_foreground:      Option<String>,
+    theme_button_inactive: Option<String>,
+    theme_button_active:   Option<String>,
+    theme_accent:          Option<String>,
+    theme_success:         Option<String>,
+    theme_warning:         Option<String>,
     active_brightness: Option<u32>,
     primary_layer_keys: Option<Vec<ButtonConfig>>,
     // Info layer is always present but starts empty; niri fills it at runtime.
@@ -118,14 +176,18 @@ fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
         base.info_layer_keys = user.info_layer_keys.or(base.info_layer_keys);
         base.primary_layer_keys = user.primary_layer_keys.or(base.primary_layer_keys);
         base.active_brightness = user.active_brightness.or(base.active_brightness);
+        base.theme_background      = user.theme_background.or(base.theme_background);
+        base.theme_foreground      = user.theme_foreground.or(base.theme_foreground);
+        base.theme_button_inactive = user.theme_button_inactive.or(base.theme_button_inactive);
+        base.theme_button_active   = user.theme_button_active.or(base.theme_button_active);
+        base.theme_accent          = user.theme_accent.or(base.theme_accent);
+        base.theme_success         = user.theme_success.or(base.theme_success);
+        base.theme_warning         = user.theme_warning.or(base.theme_warning);
     };
 
     let mut media_layer_keys = base.media_layer_keys.unwrap();
     let mut primary_layer_keys = base.primary_layer_keys.unwrap();
 
-    // Info layer: use TOML override if present, otherwise a single placeholder
-    // clock button. rebuild_info_layer() in main.rs will replace this at runtime
-    // with live Niri state (workspaces + window title + clock).
     let mut info_layer_keys = base.info_layer_keys.unwrap_or_else(|| {
         vec![
             ButtonConfig {
@@ -181,12 +243,18 @@ fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
     // Fixed order: 0 = F-keys, 1 = Info, 2 = Media
     let layers = vec![fkey_layer, info_layer, media_layer];
 
+    let theme = build_theme(
+        base.theme_background, base.theme_foreground,
+        base.theme_button_inactive, base.theme_button_active,
+        base.theme_accent, base.theme_success, base.theme_warning,
+    );
     let cfg = Config {
         show_button_outlines: base.show_button_outlines.unwrap(),
         enable_pixel_shift: base.enable_pixel_shift.unwrap(),
         adaptive_brightness: base.adaptive_brightness.unwrap(),
         font_face: load_font(&base.font_template.unwrap()),
         active_brightness: base.active_brightness.unwrap(),
+        theme,
     };
     (cfg, layers)
 }
