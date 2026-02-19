@@ -1,4 +1,3 @@
-use anyhow::Result;
 use serde_json::Value;
 use std::{
     collections::HashMap,
@@ -18,10 +17,12 @@ pub struct Workspace {
 pub struct NiriState {
     pub workspaces: Vec<Workspace>,
     pub focused_window_title: Option<String>,
+    // title lookup for WindowFocusChanged which only carries an id
     windows: HashMap<u64, String>,
     focused_window_id: Option<u64>,
     socket_path: Option<PathBuf>,
     event_stream: Option<BufReader<UnixStream>>,
+    // opened before privilege drop so actions still work as nobody
     action_stream: Option<UnixStream>,
 }
 
@@ -30,7 +31,7 @@ fn find_socket() -> Option<PathBuf> {
         let path = PathBuf::from(p);
         if path.exists() { return Some(path); }
     }
-    // Search all uid dirs
+    // glob all uid dirs because we may be running as root
     let uid_dirs = std::fs::read_dir("/run/user").ok()?;
     for uid_dir in uid_dirs.flatten() {
         if let Ok(entries) = std::fs::read_dir(uid_dir.path()) {
@@ -46,7 +47,6 @@ fn find_socket() -> Option<PathBuf> {
     None
 }
 
-/// Drain all available lines from a nonblocking BufReader.
 fn drain_lines(reader: &mut BufReader<UnixStream>) -> Vec<String> {
     let mut lines = Vec::new();
     loop {
@@ -62,24 +62,18 @@ fn drain_lines(reader: &mut BufReader<UnixStream>) -> Vec<String> {
 }
 
 impl NiriState {
-    /// Connect to niri. Must be called before privilege drop.
+    // must be called before privilege drop
     pub fn connect() -> Option<NiriState> {
         let socket_path = find_socket()?;
         eprintln!("[niri] socket: {}", socket_path.display());
 
-        // --- Event stream socket ---
         let mut stream = UnixStream::connect(&socket_path).ok()?;
         stream.write_all(b"\"EventStream\"\n").ok()?;
         let mut reader = BufReader::new(stream);
-        // Consume {"Ok":"Handled"}
         let mut ack = String::new();
         reader.read_line(&mut ack).ok()?;
 
-        // --- Action socket (persistent, stays open) ---
         let action_stream = UnixStream::connect(&socket_path).ok();
-        if action_stream.is_none() {
-            eprintln!("[niri] warning: could not open action socket");
-        }
 
         let mut state = NiriState {
             socket_path: Some(socket_path),
@@ -88,10 +82,9 @@ impl NiriState {
             ..Default::default()
         };
 
-        // Read initial burst with 3s timeout
         state.read_initial_state();
 
-        eprintln!("[niri] ready: {} workspaces, window: {:?}",
+        eprintln!("[niri] ready: {} workspaces window: {:?}",
             state.workspaces.len(), state.focused_window_title);
 
         if let Some(ref r) = state.event_stream {
@@ -128,7 +121,6 @@ impl NiriState {
         }
     }
 
-    /// Drain pending events. Returns true if state changed.
     pub fn process_events(&mut self) -> bool {
         let lines = match self.event_stream.as_mut() {
             Some(r) => drain_lines(r),
@@ -148,21 +140,21 @@ impl NiriState {
             return false;
         };
 
-        // WorkspaceActivated when switching workspaces
+        // workspace focus changed
         if let Some(inner) = event.get("WorkspaceActivated") {
             if let (Some(id), Some(focused)) = (inner["id"].as_u64(), inner["focused"].as_bool()) {
                 let mut changed = false;
                 for ws in &mut self.workspaces {
-                    let was_focused = ws.is_focused;
+                    let was = ws.is_focused;
                     ws.is_focused = focused && ws.id == id;
-                    if ws.is_focused != was_focused { changed = true; }
+                    if ws.is_focused != was { changed = true; }
                 }
                 return changed;
             }
             return false;
         }
 
-        // Full workspace list on add/remove
+        // workspace added or removed
         if let Some(inner) = event.get("WorkspacesChanged") {
             if let Some(arr) = inner["workspaces"].as_array() {
                 let mut new_ws: Vec<Workspace> = arr.iter().filter_map(parse_workspace).collect();
@@ -175,6 +167,7 @@ impl NiriState {
             return false;
         }
 
+        // full window list on initial connect
         if let Some(inner) = event.get("WindowsChanged") {
             if let Some(arr) = inner["windows"].as_array() {
                 self.windows.clear();
@@ -197,7 +190,7 @@ impl NiriState {
             return false;
         }
 
-        // Focus changed
+        // focused window id changed (event carries id only not the full window)
         if let Some(inner) = event.get("WindowFocusChanged") {
             let new_id = inner["id"].as_u64();
             if new_id == self.focused_window_id { return false; }
@@ -210,7 +203,7 @@ impl NiriState {
             return false;
         }
 
-        // window opened updated
+        // single window opened or title changed
         if let Some(inner) = event.get("WindowOpenedOrChanged") {
             if let Some(w) = inner.get("window") {
                 if let (Some(id), Some(title)) = (w["id"].as_u64(), w["title"].as_str()) {
@@ -227,7 +220,7 @@ impl NiriState {
             return false;
         }
 
-        // Window closed
+        // window closed
         if let Some(inner) = event.get("WindowClosed") {
             if let Some(id) = inner["id"].as_u64() {
                 self.windows.remove(&id);
@@ -245,7 +238,6 @@ impl NiriState {
         false
     }
 
-    /// Focus a workspace by idx.
     pub fn focus_workspace(&mut self, idx: u8) {
         let req = format!(
             "{{\"Action\":{{\"FocusWorkspace\":{{\"reference\":{{\"Index\":{}}}}}}}}}\n",
@@ -256,8 +248,6 @@ impl NiriState {
                 eprintln!("[niri] action socket write failed");
                 self.action_stream = None;
             }
-        } else {
-            eprintln!("[niri] no action socket available");
         }
     }
 }

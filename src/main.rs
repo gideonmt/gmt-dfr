@@ -632,9 +632,9 @@ pub struct FunctionLayer {
     pub buttons: Vec<(usize, Button)>,
     pub virtual_button_count: usize,
     faster_refresh: bool,
-    /// Workspace ids parallel to buttons that are NiriWorkspace variants,
-    /// so the touch handler can call focus_workspace without storing id in Key.
-    pub niri_workspace_ids: Vec<(usize, u8)>, // (button index, workspace idx)
+    pub niri_workspace_ids: Vec<(usize, u8)>,
+    // stored so rebuild_info_layer can re-expand niri_workspaces/niri_window_title entries
+    pub source_config: Vec<ButtonConfig>,
 }
 
 impl FunctionLayer {
@@ -667,6 +667,7 @@ impl FunctionLayer {
             virtual_button_count,
             faster_refresh,
             niri_workspace_ids: vec![],
+            source_config: vec![],
         }
     }
 
@@ -830,57 +831,57 @@ impl FunctionLayer {
 /// Rebuild the info layer (index 1) from live Niri state.
 /// Layout: [ws1][ws2]...[wsN][     window title     ][clock]
 fn rebuild_info_layer(layers: &mut Vec<FunctionLayer>, niri_state: &niri::NiriState) {
-    let Some(layer) = layers.get_mut(1) else {
+    let Some(info_cfg) = layers.get(1).map(|l| l.source_config.clone()) else {
         return;
     };
-
-    let ws_count = niri_state.workspaces.len();
-    // Workspace buttons each get 1 virtual slot.
-    // Window title gets a generous stretch. Clock gets 4 slots.
-    let title_stretch = 6usize;
-    let clock_stretch = 4usize;
-    let total = ws_count + title_stretch + clock_stretch;
+    let Some(layer) = layers.get_mut(1) else { return };
 
     let mut buttons: Vec<(usize, Button)> = Vec::new();
     let mut niri_workspace_ids: Vec<(usize, u8)> = Vec::new();
     let mut virt = 0usize;
+    let mut total = 0usize;
+    let mut displays_time = false;
+    let mut faster_refresh = false;
 
-    for ws in &niri_state.workspaces {
-        let btn = Button::new_niri_workspace(ws.idx, ws.is_focused, ws.id);
-        let btn_index = buttons.len();
-        niri_workspace_ids.push((btn_index, ws.idx));
+    for cfg in &info_cfg {
+        let stretch = cfg.stretch.unwrap_or(1);
+
+        if cfg.niri_workspaces == Some(true) {
+            // expand one slot per workspace
+            for ws in &niri_state.workspaces {
+                let btn_index = buttons.len();
+                niri_workspace_ids.push((btn_index, ws.idx));
+                buttons.push((virt, Button::new_niri_workspace(ws.idx, ws.is_focused, ws.id)));
+                virt += 1;
+                total += 1;
+            }
+            continue;
+        }
+
+        if cfg.niri_window_title == Some(true) {
+            let title = niri_state.focused_window_title.clone().unwrap_or_default();
+            buttons.push((virt, Button::new_niri_window_title(title)));
+            virt += stretch;
+            total += stretch;
+            continue;
+        }
+
+        // regular button (time, text, icon, battery, etc)
+        let btn = Button::with_config(cfg.clone());
+        if matches!(btn.image, ButtonImage::Time(..)) {
+            displays_time = true;
+            faster_refresh = btn.needs_faster_refresh();
+        }
         buttons.push((virt, btn));
-        virt += 1;
+        virt += stretch;
+        total += stretch;
     }
-
-    let title = niri_state
-        .focused_window_title
-        .clone()
-        .unwrap_or_default();
-    buttons.push((virt, Button::new_niri_window_title(title)));
-    virt += title_stretch;
-
-    // Clock (non-clickable)
-    let clock_format = StrftimeItems::new("%a %b %d %I:%M:%S %p")
-        .parse_to_owned()
-        .expect("valid clock format");
-    buttons.push((
-        virt,
-        Button {
-            action: vec![],
-            active: false,
-            changed: true,
-            clickable: false,
-            image: ButtonImage::Time(clock_format, Locale::POSIX),
-        },
-    ));
-    virt += clock_stretch;
 
     layer.buttons = buttons;
     layer.virtual_button_count = total.max(virt);
     layer.niri_workspace_ids = niri_workspace_ids;
-    layer.displays_time = true;
-    layer.faster_refresh = true; // clock has seconds
+    layer.displays_time = displays_time;
+    layer.faster_refresh = faster_refresh;
 }
 
 struct Interface;

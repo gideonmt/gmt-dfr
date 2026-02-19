@@ -35,6 +35,8 @@ struct ConfigProxy {
     adaptive_brightness: Option<bool>,
     active_brightness: Option<u32>,
     primary_layer_keys: Option<Vec<ButtonConfig>>,
+    // Info layer is always present but starts empty; niri fills it at runtime.
+    // This field is kept for TOML override/fallback only.
     info_layer_keys: Option<Vec<ButtonConfig>>,
     media_layer_keys: Option<Vec<ButtonConfig>>,
 }
@@ -66,7 +68,7 @@ where
     deserializer.deserialize_any(ArrayOrSingle)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct ButtonConfig {
     #[serde(alias = "Svg")]
@@ -79,6 +81,9 @@ pub struct ButtonConfig {
     #[serde(deserialize_with = "array_or_single", default)]
     pub action: Vec<Key>,
     pub stretch: Option<usize>,
+    // special dynamic button types for the info layer
+    pub niri_workspaces: Option<bool>,
+    pub niri_window_title: Option<bool>,
 }
 
 fn load_font(name: &str) -> FontFace {
@@ -114,20 +119,39 @@ fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
         base.primary_layer_keys = user.primary_layer_keys.or(base.primary_layer_keys);
         base.active_brightness = user.active_brightness.or(base.active_brightness);
     };
+
     let mut media_layer_keys = base.media_layer_keys.unwrap();
     let mut primary_layer_keys = base.primary_layer_keys.unwrap();
+
+    // Info layer: use TOML override if present, otherwise a single placeholder
+    // clock button. rebuild_info_layer() in main.rs will replace this at runtime
+    // with live Niri state (workspaces + window title + clock).
     let mut info_layer_keys = base.info_layer_keys.unwrap_or_else(|| {
-        vec![ButtonConfig {
-            icon: None,
-            text: None,
-            theme: None,
-            time: Some("%a %b %d %I:%M:%S %p".into()),
-            battery: None,
-            locale: None,
-            action: vec![],
-            stretch: Some(12),
-        }]
+        vec![
+            ButtonConfig {
+                niri_workspaces: Some(true),
+                stretch: None,
+                icon: None, text: None, theme: None, time: None,
+                battery: None, locale: None, action: vec![],
+                niri_window_title: None,
+            },
+            ButtonConfig {
+                niri_window_title: Some(true),
+                stretch: Some(6),
+                icon: None, text: None, theme: None, time: None,
+                battery: None, locale: None, action: vec![],
+                niri_workspaces: None,
+            },
+            ButtonConfig {
+                time: Some("%a %b %d %I:%M:%S %p".into()),
+                stretch: Some(4),
+                icon: None, text: None, theme: None,
+                battery: None, locale: None, action: vec![],
+                niri_workspaces: None, niri_window_title: None,
+            },
+        ]
     });
+
     if width >= 2170 {
         for layer in [&mut media_layer_keys, &mut info_layer_keys, &mut primary_layer_keys] {
             layer.insert(
@@ -141,14 +165,22 @@ fn load_config(width: u16) -> (Config, Vec<FunctionLayer>) {
                     time: None,
                     locale: None,
                     battery: None,
+                    niri_workspaces: None,
+                    niri_window_title: None,
                 },
             );
         }
     }
+
     let fkey_layer = FunctionLayer::with_config(primary_layer_keys);
-    let info_layer = FunctionLayer::with_config(info_layer_keys);
+    let mut info_layer = FunctionLayer::with_config(info_layer_keys.clone());
+    // stored so rebuild_info_layer can re-expand dynamic entries on niri state changes
+    info_layer.source_config = info_layer_keys;
     let media_layer = FunctionLayer::with_config(media_layer_keys);
+
+    // Fixed order: 0 = F-keys, 1 = Info, 2 = Media
     let layers = vec![fkey_layer, info_layer, media_layer];
+
     let cfg = Config {
         show_button_outlines: base.show_button_outlines.unwrap(),
         enable_pixel_shift: base.enable_pixel_shift.unwrap(),

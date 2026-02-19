@@ -131,6 +131,13 @@ PrimaryLayerKeys = [
     # Stretch functions the same way as it does for normal buttons.
 ]
 
+InfoLayerKeys = [
+    { NiriWorkspaces = true },
+    { NiriWindowTitle = true, Stretch = 6 },
+    { Battery = "both", Action = "Battery" },
+    { Time = "%a %b %d %I:%M:%S %p", Stretch = 4 }
+]
+
 # This key defines the contents of the media key layer
 MediaLayerKeys = [
     { Icon = "brightness_low",  Action = "BrightnessDown" },
